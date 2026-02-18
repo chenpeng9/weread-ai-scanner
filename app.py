@@ -7,6 +7,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import io
+import os
 
 # ==========================================
 # 1. 系统指令 (毒舌审计师)
@@ -92,13 +93,40 @@ class AIAnalyst:
 # ==========================================
 # 2. 初始化
 # ==========================================
-st.set_page_config(page_title="WeRead AI", page_icon="💀", layout="wide")
-
-if 'history_df' not in st.session_state:
-    st.session_state.history_df = pd.DataFrame(columns=["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"])
+# 定义仓库中初始文件的名称
+INIT_XML_PATH = "WeChat Official Accounts List.xml"
 
 if 'config_list' not in st.session_state:
-    st.session_state.config_list = pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴", "启用": True}])
+    # 优先检查仓库里有没有这个初始文件
+    if os.path.exists(INIT_XML_PATH):
+        try:
+            ns = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+            tree = ET.parse(INIT_XML_PATH)
+            root = tree.getroot()
+            init_configs = []
+            # 同样使用跳过第一行的解析逻辑
+            for i, row in enumerate(root.findall(".//ss:Row", ns)):
+                if i == 0: continue 
+                cells = row.findall("ss:Cell", ns)
+                if len(cells) >= 3:
+                    name_el = cells[1].find("ss:Data", ns)
+                    id_el = cells[2].find("ss:Data", ns)
+                    if name_el is not None and id_el is not None:
+                        init_configs.append({
+                            "ID": id_el.text.strip(), 
+                            "公众号": name_el.text.strip(), 
+                            "启用": True
+                        })
+            if init_configs:
+                st.session_state.config_list = pd.DataFrame(init_configs)
+        except:
+            # 如果解析出错，回退到默认单条数据
+            st.session_state.config_list = pd.DataFrame([{"ID": "gh_98556de4c22e", "公众号": "浩哥三点下班
+", "启用": True}])
+    else:
+        # 仓库里没文件时，显示默认演示数据
+        st.session_state.config_list = pd.DataFrame([{"ID": "gh_98556de4c22e", "公众号": "浩哥三点下班
+", "启用": True}])
 
 # ==========================================
 # 3. 侧边栏
