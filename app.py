@@ -50,7 +50,6 @@ class DataManager:
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
             df = df[EXPECTED_COLS]
-            # 强制类型转换，确保排序不出错
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
             df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
@@ -99,7 +98,6 @@ class WxSource:
     def fetch_content(self, url):
         try:
             r = requests.post(self.content_api, json={"key": self.key, "url": url}, timeout=20).json()
-            # 📉 降速优化：只取前 5000 字，防 Token 溢出
             return r.get("data", {}).get("text", "")[:5000] if str(r.get("code")) == "0" else ""
         except: return ""
 
@@ -117,18 +115,13 @@ class AIAnalyst:
         except Exception as e: return 0, str(e)
 
     def analyze(self, text, title):
-        # 🛡️ 强制冷却：防 429 限流
         time.sleep(4) 
-        
         payload = {
             "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
             "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
         }
-        
         try:
             r = requests.post(self.url, json=payload, timeout=30)
-            
-            # 自动重试机制
             if r.status_code == 429:
                 if self.debug: st.warning("⚠️ 限流冷却中 (12s)...")
                 time.sleep(12)
@@ -142,7 +135,6 @@ class AIAnalyst:
             raw = r.json()['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             return json.loads(match.group(0)) if match else None
-            
         except Exception as e:
             if self.debug: st.error(f"❌ Analyst Crash: {str(e)}")
             return None
@@ -243,17 +235,21 @@ def render_results():
         with col2:
             show_table = st.toggle("📋 表格", False)
 
-        # 1. 先过滤日期
         df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
         
         if show_table:
-            # --- 表格模式 (默认按时间) ---
-            def style(v):
-                if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
-                elif v >= 6: return 'background-color: #cce5ff; color: #004085'
-                else: return ''
+            # --- 表格模式 (修复 4 档颜色) ---
+            def style_score(v):
+                try:
+                    v = int(v)
+                    if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold' # 绿 (Alpha)
+                    elif v >= 6: return 'background-color: #cce5ff; color: #004085' # 蓝 (合格)
+                    elif v >= 3: return 'background-color: #fff3cd; color: #856404' # 黄 (平庸)
+                    else: return 'background-color: #f8d7da; color: #721c24' # 红 (垃圾)
+                except: return ''
+
             st.dataframe(
-                df.sort_values(["日期", "时间"], ascending=False).style.map(style, subset=['价值']),
+                df.sort_values(["日期", "时间"], ascending=False).style.map(style_score, subset=['价值']),
                 column_config={"原文": st.column_config.LinkColumn("🔗"), "价值": st.column_config.NumberColumn("分")},
                 hide_index=True, width="stretch", height=600
             )
@@ -262,16 +258,11 @@ def render_results():
             st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
 
         else:
-            # --- 卡片模式 (支持排序) ---
-            # ✨ 新增：排序控制器
+            # --- 卡片模式 ---
             sort_mode = st.radio("排序", ["⏱️ 时间倒序", "🔥 评分最高"], horizontal=True, label_visibility="collapsed")
-            
-            # ✨ 核心：排序逻辑
             if sort_mode == "🔥 评分最高":
-                # 优先按价值降序，价值相同按时间降序
                 df_sorted = df.sort_values(by=["价值", "日期", "时间"], ascending=[False, False, False])
             else:
-                # 默认时间降序
                 df_sorted = df.sort_values(by=["日期", "时间"], ascending=[False, False])
 
             if df_sorted.empty: st.info("📭 无记录")
@@ -279,6 +270,7 @@ def render_results():
             for _, row in df_sorted.iterrows():
                 try: score = int(row['价值'])
                 except: score = 0
+                # 卡片模式的 4 档颜色
                 if score >= 8: color, icon = "green", "🟢"
                 elif score >= 6: color, icon = "blue", "🔵"
                 elif score >= 3: color, icon = "orange", "🟡"
