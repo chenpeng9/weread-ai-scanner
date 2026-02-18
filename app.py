@@ -16,8 +16,9 @@ from streamlit_gsheets import GSheetsConnection
 PAGE_TITLE = "WeRead AI (微读精选)"
 PAGE_ICON = "📖"
 DEFAULT_XML_PATH = "WeChat Official Accounts List.xml"
+EXPECTED_COLS = ["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"] # 🔒 锁定标准列名
 
-# ⚠️ Skill: 毒舌审计师 (保持不变)
+# ⚠️ Skill: 毒舌审计师
 SYSTEM_INSTRUCTION = """
 【角色】你是一位像“浑水调研”一样毒辣、冷血的顶级做空机构分析师。你对市场噪音极度不耐烦，对“割韭菜”的行为深恶痛绝。
 【评分标准 (0-10分)】
@@ -32,7 +33,7 @@ SYSTEM_INSTRUCTION = """
 """
 
 # ==========================================
-# 2. 数据层 (Google Sheets)
+# 2. 数据层 (修复版)
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -42,29 +43,43 @@ class DataManager:
         except: self.enabled = False
             
     def load_data(self):
-        cols = ["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"]
-        if not self.enabled: return pd.DataFrame(columns=cols)
+        if not self.enabled: return pd.DataFrame(columns=EXPECTED_COLS)
         try:
             df = self.conn.read(ttl=0)
-            if df.empty or not all(c in df.columns for c in cols): return pd.DataFrame(columns=cols)
-            # 强制清理数据类型，防止后续报错
+            # 🛡️ 防御性清洗：只要标准列，多余的不要，缺少的补齐
+            if df.empty: return pd.DataFrame(columns=EXPECTED_COLS)
+            
+            # 补齐缺失列
+            for col in EXPECTED_COLS:
+                if col not in df.columns: df[col] = ""
+            
+            # 只取标准列
+            df = df[EXPECTED_COLS]
+            
+            # 类型清洗：防止 NaN 导致报错
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
-            df['日期'] = df['日期'].astype(str) # 确保日期是字符串
+            df['原文'] = df['原文'].fillna("").astype(str) # 防止 URL 为空报错
+            df['日期'] = df['日期'].astype(str)
             return df
-        except: return pd.DataFrame(columns=cols)
+        except: return pd.DataFrame(columns=EXPECTED_COLS)
 
     def save_data(self, new_df):
         if not self.enabled: return new_df
         try:
+            # 🛡️ 写入前清洗：确保只写入标准列
+            new_df = new_df[EXPECTED_COLS]
+            
             old = self.load_data()
             combined = pd.concat([new_df, old], ignore_index=True).drop_duplicates(subset=['原文'], keep='first')
             combined = combined.sort_values(by=["日期", "时间"], ascending=False)
             self.conn.update(data=combined)
             return combined
-        except: return new_df
+        except Exception as e:
+            st.error(f"保存失败: {e}")
+            return new_df
 
 # ==========================================
-# 3. 服务层 (API)
+# 3. 服务层
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -134,7 +149,7 @@ def init_state():
 def render_sidebar():
     with st.sidebar:
         st.title(f"{PAGE_ICON} WeRead AI")
-        wx_key = st.secrets.get("WX_KEY", st.text_input("WxRank Key", value="5e1bde783213147e8907"))
+        wx_key = st.secrets.get("WX_KEY", st.text_input("WxRank Key", type="password"))
         gemini_key = st.secrets.get("GEMINI_KEY", st.text_input("Gemini Key", type="password"))
         
         st.divider()
@@ -181,30 +196,20 @@ def render_sidebar():
 
 def render_results():
     if not st.session_state.history_df.empty:
-        # --- 顶部工具栏 ---
+        # 头部工具栏
         col1, col2 = st.columns([1.5, 1])
         with col1:
-            # ⚠️ 修复核心：数据清洗
-            # 1. 确保是字符串 2. 去除空值 3. 排序
             raw_dates = st.session_state.history_df['日期'].astype(str).dropna().unique().tolist()
-            # 过滤掉可能的 'nan' 字符串
             valid_dates = [d for d in raw_dates if d.lower() != 'nan' and len(d) > 0]
             all_dates = ["全部"] + sorted(valid_dates, reverse=True)
-            
             sel_date = st.selectbox("📅 日期回溯", all_dates, label_visibility="collapsed")
         with col2:
             show_table = st.toggle("📋 表格", False)
 
-        # 数据过滤
-        if sel_date == "全部":
-            df = st.session_state.history_df
-        else:
-            # 确保比较时双方都是字符串
-            df = st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
+        df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
         
-        # --- 核心视图渲染 ---
         if show_table:
-            # 💻 桌面/表格模式
+            # 表格模式
             def style(v):
                 if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
                 elif v >= 6: return 'background-color: #cce5ff; color: #004085'
@@ -219,7 +224,7 @@ def render_results():
             st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
 
         else:
-            # 📱 手机/卡片模式
+            # 卡片模式
             if df.empty: st.info("📭 无记录")
             
             for _, row in df.sort_values(["日期", "时间"], ascending=False).iterrows():
@@ -244,7 +249,12 @@ def render_results():
                     with c_meta:
                         st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
                     with c_btn:
-                        st.link_button("👉 阅读全文", row['原文'], type="primary", width="stretch")
+                        # 🛡️ 修复核心：如果 URL 无效，按钮会报错，这里加判断
+                        url = str(row['原文']).strip()
+                        if url and url.startswith("http"):
+                            st.link_button("👉 阅读全文", url, type="primary", width="stretch")
+                        else:
+                            st.button("🚫 无链接", disabled=True, width="stretch", key=f"btn_{row.name}")
 
     else:
         st.info("👋 暂无记录，请点击侧边栏「🚀 开始」")
@@ -274,7 +284,6 @@ def main():
                 today = datetime.now().strftime('%Y-%m-%d')
                 
                 for i, r in enumerate(targets.itertuples()):
-                    # ⚠️ 修复：比较前确保格式一致
                     if not frc and not st.session_state.history_df[
                         (st.session_state.history_df['公众号']==r.公众号) & 
                         (st.session_state.history_df['日期'].astype(str)==today)
@@ -286,7 +295,17 @@ def main():
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
                                 if res := ana.analyze(txt, a['title']):
-                                    new_data.append({**a, "时间":a['full_time'], "公众号":r.公众号, "价值":res.get('score',0), "摘要":res.get('summary',''), "点评":res.get('suggestion','')})
+                                    # 🛡️ 修复核心：显式构造字典，防止 **a 把英文 key 混进去
+                                    new_data.append({
+                                        "日期": a['date'], 
+                                        "时间": a['full_time'][11:16],
+                                        "公众号": r.公众号, 
+                                        "标题": a['title'], 
+                                        "价值": res.get('score', 0), 
+                                        "摘要": res.get('summary', ''), 
+                                        "点评": res.get('suggestion', ''), 
+                                        "原文": a['url']
+                                    })
                     bar.progress((i+1)/len(targets))
                 
                 if new_data:
