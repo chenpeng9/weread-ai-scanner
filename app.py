@@ -104,7 +104,7 @@ if 'config_list' not in st.session_state:
 # 3. 侧边栏
 # ==========================================
 with st.sidebar:
-    st.title("💀 WeRead AI")
+    st.title("📖 WeRead AI")
     
     # ✨ 密钥管理升级：优先从 Secrets 读取，读不到才显示输入框
     if "WX_KEY" in st.secrets:
@@ -200,7 +200,7 @@ with st.sidebar:
 # ==========================================
 # 4. 刷新逻辑
 # ==========================================
-st.title("💀 WeRead AI (毒舌审计版)")
+st.title("📖 WeRead AI (微读精选)")
 
 if refresh_btn:
     if not gemini_key:
