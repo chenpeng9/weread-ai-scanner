@@ -12,12 +12,11 @@ from datetime import datetime, timedelta
 # ==========================================
 # 1. 全局配置与核心指令
 # ==========================================
-# ✨ 修改点 1：名称回归“微读精选”
 PAGE_TITLE = "WeRead AI (微读精选)"
 PAGE_ICON = "📖"
 DEFAULT_XML_PATH = "WeChat Official Accounts List.xml"
 
-# ⚠️ 核心 Skill：毒舌做空机构分析师 (完全保留，未修改)
+# ⚠️ 核心 Skill：毒舌做空机构分析师 (完全保留)
 SYSTEM_INSTRUCTION = """
 【角色】你是一位像“浑水调研”一样毒辣、冷血的顶级做空机构分析师。你对市场噪音极度不耐烦，对“割韭菜”的行为深恶痛绝。
 
@@ -43,25 +42,37 @@ SYSTEM_INSTRUCTION = """
 """
 
 # ==========================================
-# 2. 服务层 (API 交互)
+# 2. 服务层 (API 交互 - 带 Debug)
 # ==========================================
 class WxSource:
-    def __init__(self, api_key):
+    def __init__(self, api_key, debug_mode=False):
         self.api_key = api_key
+        self.debug_mode = debug_mode
         self.list_api = "http://data.wxrank.com/weixin/getps"
         self.content_api = "http://data.wxrank.com/weixin/artinfo"
 
     def get_scoped_articles(self, wxid, days_back=0):
         params = {"key": self.api_key, "wxid": wxid}
         target_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days_back + 1)]
+        
         try:
             resp = requests.get(self.list_api, params=params, timeout=10)
             data = resp.json()
+            
+            # 🐞 Debug 输出
+            if self.debug_mode:
+                st.markdown(f"**[Debug] WxRank List API ({wxid})**")
+                st.json(data)
+
             if str(data.get("code")) == "0":
                 raw_list = data.get("data", {}).get("list", []) or data.get("data", [])
                 matched = []
                 for item in raw_list:
                     pub_time = item.get("pub_time") or ""
+                    # 🐞 Debug: 打印每篇文章时间比对
+                    if self.debug_mode:
+                        st.text(f"  - 文章: {item.get('title')} | 时间: {pub_time} | 目标: {target_dates}")
+                        
                     if any(pub_time.startswith(d) for d in target_dates):
                         matched.append({
                             "title": item.get("title") or item.get("msg_title"),
@@ -70,19 +81,28 @@ class WxSource:
                         })
                 return matched
             return []
-        except: return []
+        except Exception as e:
+            if self.debug_mode: st.error(f"❌ WxRank 请求失败: {e}")
+            return []
 
     def fetch_content(self, url):
         try:
             resp = requests.post(self.content_api, json={"key": self.api_key, "url": url}, timeout=20)
-            if str(resp.json().get("code")) == "0":
-                return resp.json().get("data", {}).get("text", "")[:8000]
+            data = resp.json()
+            
+            # 🐞 Debug 输出 (只打印状态码，避免刷屏)
+            if self.debug_mode:
+                st.text(f"  [Debug] Fetch Content Code: {data.get('code')}")
+                
+            if str(data.get("code")) == "0":
+                return data.get("data", {}).get("text", "")[:8000]
             return ""
         except: return ""
 
 class AIAnalyst:
-    def __init__(self, api_key):
+    def __init__(self, api_key, debug_mode=False):
         self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        self.debug_mode = debug_mode
 
     def analyze(self, text, title):
         payload = {
@@ -91,11 +111,20 @@ class AIAnalyst:
         }
         try:
             resp = requests.post(self.url, json=payload, timeout=30)
-            if resp.status_code != 200: return None
+            
+            if self.debug_mode:
+                 st.text(f"  [Debug] Gemini Status: {resp.status_code}")
+                 
+            if resp.status_code != 200: 
+                if self.debug_mode: st.error(f"Gemini Error: {resp.text}")
+                return None
+            
             raw = resp.json()['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             return json.loads(match.group(0)) if match else None
-        except: return None
+        except Exception as e:
+            if self.debug_mode: st.error(f"Gemini Exception: {e}")
+            return None
 
 # ==========================================
 # 3. 工具函数
@@ -149,11 +178,16 @@ def render_sidebar():
         else:
             gemini_key = st.text_input("Gemini API Key", type="password")
             if not gemini_key:
-                st.info("👆 请输入 Gemini Key 以启用阅读助手")
+                st.info("👆 请输入 Gemini Key")
 
         st.divider()
         
-        # --- B. 范围设置 (✨ 修改点：文案改为“阅读”) ---
+        # --- ✨ 新增：Debug 开关 ---
+        debug_mode = st.toggle("🐞 开启 Debug 模式", value=False)
+        
+        st.divider()
+        
+        # --- B. 范围设置 ---
         time_scope = st.selectbox("📅 阅读范围", options=[0, 1], format_func=lambda x: "仅今日 (24h)" if x == 0 else "今日 + 昨日 (48h)")
         
         # --- C. 手动导入 ---
@@ -172,7 +206,7 @@ def render_sidebar():
         st.divider()
         st.subheader("📁 账号管理")
 
-        # --- D. 批量操作 (width 已修复) ---
+        # --- D. 批量操作 ---
         col_b1, col_b2 = st.columns(2)
         if col_b1.button("✅ 全选", width="stretch"):
             st.session_state.config_list["启用"] = True
@@ -207,19 +241,18 @@ def render_sidebar():
 
         st.divider()
         
-        # --- F. 主操作区 (✨ 修改点：文案改为“开始阅读”) ---
+        # --- F. 主操作区 ---
         c1, c2 = st.columns(2)
         trigger = c1.button("🚀 开始阅读", type="primary", width="stretch")
         if c2.button("🗑️ 清空历史", width="stretch"):
             st.session_state.history_df = st.session_state.history_df.iloc[0:0]
             st.rerun()
             
-        return wx_key, gemini_key, time_scope, trigger
+        return wx_key, gemini_key, time_scope, trigger, debug_mode
 
 def render_results():
     if not st.session_state.history_df.empty:
         c1, c2 = st.columns([1, 4])
-        # ✨ 修改点：文案
         c1.metric("今日已读", len(st.session_state.history_df))
         
         buffer = io.BytesIO()
@@ -258,7 +291,6 @@ def render_results():
             hide_index=True, width="stretch", height=600
         )
     else:
-        # ✨ 修改点：空状态提示
         st.info("👋 暂无阅读记录。请在左侧勾选账号并点击「开始阅读」。")
 
 # ==========================================
@@ -268,20 +300,26 @@ def main():
     st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
     init_session_state()
     
-    wx_key, gemini_key, time_scope, trigger = render_sidebar()
+    # ✨ 接收 debug_mode 参数
+    wx_key, gemini_key, time_scope, trigger, debug_mode = render_sidebar()
     
-    # ✨ 修改点：主标题
     st.title(f"{PAGE_ICON} {PAGE_TITLE}")
 
     if trigger:
         if not gemini_key:
-            st.error("❌ 缺少 Gemini API Key，请配置 Secrets 或手动输入。")
+            st.error("❌ 缺少 Gemini API Key。")
         else:
-            source = WxSource(wx_key)
-            analyst = AIAnalyst(gemini_key)
+            # ✨ 将 debug_mode 传入服务类
+            source = WxSource(wx_key, debug_mode=debug_mode)
+            analyst = AIAnalyst(gemini_key, debug_mode=debug_mode)
+            
             active_list = st.session_state.config_list[st.session_state.config_list["启用"] == True]
             
             st.toast(f"🎯 任务启动：准备阅读 {len(active_list)} 个公众号")
+            
+            # 🐞 Debug 区域
+            if debug_mode:
+                st.warning("⚠️ 调试模式已开启，将显示详细 API 日志...")
             
             if active_list.empty:
                 st.warning("⚠️ 列表为空！请先勾选账号并点击【💾 保存状态】。")
@@ -290,7 +328,17 @@ def main():
                 new_records = []
                 for idx, row in enumerate(active_list.itertuples()):
                     st.toast(f"📖 正在阅读: {row.公众号}...")
+                    
+                    # 🐞 Debug: 打印当前正在处理的账号
+                    if debug_mode:
+                        st.markdown(f"---")
+                        st.markdown(f"#### 🔎 正在检查: {row.公众号} (ID: {row.ID})")
+                        
                     articles = source.get_scoped_articles(row.ID, days_back=time_scope)
+                    
+                    if debug_mode and not articles:
+                        st.caption("⚠️ 该账号在指定范围内无文章，或 API 返回为空。")
+
                     for art in articles:
                         if not (st.session_state.history_df['原文'] == art['url']).any():
                             content = source.fetch_content(art['url'])
