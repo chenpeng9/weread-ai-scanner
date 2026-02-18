@@ -50,6 +50,7 @@ class DataManager:
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
             df = df[EXPECTED_COLS]
+            # 强制类型转换，确保排序不出错
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
             df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
@@ -70,7 +71,7 @@ class DataManager:
             return new_df
 
 # ==========================================
-# 3. 服务层 (🛡️ 抗 429 限流版)
+# 3. 服务层
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -98,12 +99,13 @@ class WxSource:
     def fetch_content(self, url):
         try:
             r = requests.post(self.content_api, json={"key": self.key, "url": url}, timeout=20).json()
-            return r.get("data", {}).get("text", "")[:8000] if str(r.get("code")) == "0" else ""
+            # 📉 降速优化：只取前 5000 字，防 Token 溢出
+            return r.get("data", {}).get("text", "")[:5000] if str(r.get("code")) == "0" else ""
         except: return ""
 
 class AIAnalyst:
     def __init__(self, key, debug=False):
-        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
         self.debug = debug
         self.key = key
 
@@ -115,8 +117,7 @@ class AIAnalyst:
         except Exception as e: return 0, str(e)
 
     def analyze(self, text, title):
-        # 🛡️ 策略 1：主动降速 (每次调用前强制休息 3 秒)
-        # 免费版 Gemini 一般限制 15 RPM (每分钟15次)，也就是 4秒/次
+        # 🛡️ 强制冷却：防 429 限流
         time.sleep(4) 
         
         payload = {
@@ -127,11 +128,11 @@ class AIAnalyst:
         try:
             r = requests.post(self.url, json=payload, timeout=30)
             
-            # 🛡️ 策略 2：遇到 429 自动重试
+            # 自动重试机制
             if r.status_code == 429:
-                if self.debug: st.warning("⚠️ 触发 Gemini 限流 (429)，正在冷却 12 秒后重试...")
-                time.sleep(12) # 冷却
-                r = requests.post(self.url, json=payload, timeout=30) # 重试一次
+                if self.debug: st.warning("⚠️ 限流冷却中 (12s)...")
+                time.sleep(12)
+                r = requests.post(self.url, json=payload, timeout=30)
             
             if self.debug and r.status_code != 200:
                 st.error(f"❌ Gemini Error ({r.status_code}): {r.text}")
@@ -188,10 +189,10 @@ def render_sidebar():
         force = c2.toggle("⚡ 强刷", False)
         
         if debug and gemini_key:
-            if st.button("🧪 测试 Gemini 连通性", width="stretch"):
+            if st.button("🧪 测试 Gemini", width="stretch"):
                 ana = AIAnalyst(gemini_key, debug=True)
                 code, msg = ana.test_connection()
-                if code == 200: st.toast("✅ Gemini 连接成功！", icon="🎉")
+                if code == 200: st.toast("✅ 连接成功！", icon="🎉")
                 else: st.error(f"连接失败 ({code}): {msg}")
 
         time_scope = st.selectbox("📅 范围", [0, 1], format_func=lambda x: "仅今日" if x == 0 else "近48小时")
@@ -242,9 +243,11 @@ def render_results():
         with col2:
             show_table = st.toggle("📋 表格", False)
 
+        # 1. 先过滤日期
         df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
         
         if show_table:
+            # --- 表格模式 (默认按时间) ---
             def style(v):
                 if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
                 elif v >= 6: return 'background-color: #cce5ff; color: #004085'
@@ -259,14 +262,27 @@ def render_results():
             st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
 
         else:
-            if df.empty: st.info("📭 无记录")
-            for _, row in df.sort_values(["日期", "时间"], ascending=False).iterrows():
+            # --- 卡片模式 (支持排序) ---
+            # ✨ 新增：排序控制器
+            sort_mode = st.radio("排序", ["⏱️ 时间倒序", "🔥 评分最高"], horizontal=True, label_visibility="collapsed")
+            
+            # ✨ 核心：排序逻辑
+            if sort_mode == "🔥 评分最高":
+                # 优先按价值降序，价值相同按时间降序
+                df_sorted = df.sort_values(by=["价值", "日期", "时间"], ascending=[False, False, False])
+            else:
+                # 默认时间降序
+                df_sorted = df.sort_values(by=["日期", "时间"], ascending=[False, False])
+
+            if df_sorted.empty: st.info("📭 无记录")
+            
+            for _, row in df_sorted.iterrows():
                 try: score = int(row['价值'])
                 except: score = 0
-                if score >= 8: color = "green"
-                elif score >= 6: color = "blue"
-                elif score >= 3: color = "orange"
-                else: color = "red"
+                if score >= 8: color, icon = "green", "🟢"
+                elif score >= 6: color, icon = "blue", "🔵"
+                elif score >= 3: color, icon = "orange", "🟡"
+                else: color, icon = "red", "🔴"
 
                 with st.container(border=True):
                     c_head, c_score = st.columns([3.5, 1])
@@ -321,7 +337,6 @@ def main():
                     for a in src.get_scoped_articles(r.ID, scope):
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
-                                # 🔍 分析阶段
                                 if res := ana.analyze(txt, a['title']):
                                     new_data.append({
                                         "日期": a['date'], "时间": a['full_time'][11:16], "公众号": r.公众号, 
