@@ -121,12 +121,10 @@ if 'config_list' not in st.session_state:
                 st.session_state.config_list = pd.DataFrame(init_configs)
         except:
             # 如果解析出错，回退到默认单条数据
-            st.session_state.config_list = pd.DataFrame([{"ID": "gh_98556de4c22e", "公众号": "浩哥三点下班
-", "启用": True}])
+            st.session_state.config_list = pd.DataFrame([{"ID": "gh_98556de4c22e", "公众号": "浩哥三点下班", "启用": True}])
     else:
         # 仓库里没文件时，显示默认演示数据
-        st.session_state.config_list = pd.DataFrame([{"ID": "gh_98556de4c22e", "公众号": "浩哥三点下班
-", "启用": True}])
+        st.session_state.config_list = pd.DataFrame([{"ID": "gh_98556de4c22e", "公众号": "浩哥三点下班", "启用": True}])
 
 # ==========================================
 # 3. 侧边栏
