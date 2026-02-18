@@ -252,47 +252,94 @@ def render_sidebar():
 
 def render_results():
     if not st.session_state.history_df.empty:
-        c1, c2 = st.columns([1, 4])
+        # --- 顶部统计与导出 (保持不变) ---
+        c1, c2 = st.columns([1, 2]) # 调整比例适配手机
         c1.metric("今日已读", len(st.session_state.history_df))
         
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            st.session_state.history_df.to_excel(writer, index=False, sheet_name='WeRead_Report')
-            ws = writer.sheets['WeRead_Report']
-            ws.set_column('D:D', 40)
-            ws.set_column('F:F', 60)
-            
+            st.session_state.history_df.to_excel(writer, index=False, sheet_name='Report')
         c2.download_button(
-            label="📥 导出阅读笔记 (Excel)",
-            data=buffer.getvalue(),
-            file_name=f"WeRead_Notes_{datetime.now().strftime('%m%d')}.xlsx",
-            mime="application/vnd.ms-excel"
+            "📥 导出 Excel", 
+            data=buffer.getvalue(), 
+            file_name=f"WeRead_{datetime.now().strftime('%m%d')}.xlsx",
+            use_container_width=True # 手机上按钮拉宽更好按
         )
 
-        def highlight_score(val):
-            if isinstance(val, (int, float)):
-                if val >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
-                elif val >= 6: return 'background-color: #cce5ff; color: #004085'
-                elif val >= 3: return 'background-color: #fff3cd; color: #856404'
-                else: return 'background-color: #f8d7da; color: #721c24'
-            return ''
+        st.write("---")
 
-        df_sorted = st.session_state.history_df.sort_values(by=["日期", "时间"], ascending=False)
-        styled_df = df_sorted.style.map(highlight_score, subset=['价值'])
+        # --- ✨ 核心优化：Tab 切换视图 ---
+        # 默认第一个是手机视图，第二个是桌面视图
+        tab_mobile, tab_desktop = st.tabs(["📱 手机卡片模式", "💻 桌面表格模式"])
 
-        st.dataframe(
-            styled_df,
-            column_config={
-                "原文": st.column_config.LinkColumn("链接", display_text="🔗 直达"),
-                "价值": st.column_config.NumberColumn("评分", format="%d 分"),
-                "摘要": st.column_config.TextColumn("核心摘要", width="large"),
-                "点评": st.column_config.TextColumn("毒舌点评", width="medium"),
-            },
-            hide_index=True, width="stretch", height=600
-        )
+        # ==========================================
+        # 模式 A: 手机卡片流 (Mobile Card View)
+        # ==========================================
+        with tab_mobile:
+            # 按时间倒序
+            df_sorted = st.session_state.history_df.sort_values(by=["日期", "时间"], ascending=False)
+            
+            for index, row in df_sorted.iterrows():
+                # 根据分数定义颜色和边框
+                score = row['价值']
+                if score >= 8:
+                    border_color = "#d4edda" # 绿
+                    score_badge = f"🟢 **{score} 分 (Alpha)**"
+                elif score >= 6:
+                    border_color = "#cce5ff" # 蓝
+                    score_badge = f"🔵 **{score} 分 (合格)**"
+                elif score >= 3:
+                    border_color = "#fff3cd" # 黄
+                    score_badge = f"🟡 **{score} 分 (平庸)**"
+                else:
+                    border_color = "#f8d7da" # 红
+                    score_badge = f"🔴 **{score} 分 (垃圾)**"
+
+                # 渲染卡片容器
+                with st.container(border=True):
+                    # 第一行：标题 + 分数
+                    st.markdown(f"### {row['标题']}")
+                    st.markdown(score_badge)
+                    
+                    # 第二行：摘要 (引用样式)
+                    st.info(f"💡 {row['摘要']}")
+                    
+                    # 第三行：毒舌点评 (如果有)
+                    if row['点评'] and len(str(row['点评'])) > 1:
+                        st.markdown(f"> 💬 **毒舌点评**：{row['点评']}")
+                    
+                    # 第四行：元数据 + 链接按钮
+                    m1, m2 = st.columns([2, 1])
+                    m1.caption(f"📅 {row['时间']} | 📢 {row['公众号']}")
+                    # 大大的按钮，方便手指点击
+                    st.link_button("👉 阅读原文", row['原文'], use_container_width=True)
+
+        # ==========================================
+        # 模式 B: 桌面热力图 (Desktop Table View)
+        # ==========================================
+        with tab_desktop:
+            def highlight_score(val):
+                if isinstance(val, (int, float)):
+                    if val >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
+                    elif val >= 6: return 'background-color: #cce5ff; color: #004085'
+                    elif val >= 3: return 'background-color: #fff3cd; color: #856404'
+                    else: return 'background-color: #f8d7da; color: #721c24'
+                return ''
+
+            st.dataframe(
+                st.session_state.history_df.sort_values(by=["日期", "时间"], ascending=False).style.map(highlight_score, subset=['价值']),
+                column_config={
+                    "原文": st.column_config.LinkColumn("链接", display_text="🔗"),
+                    "价值": st.column_config.NumberColumn("分", format="%d"),
+                    "摘要": st.column_config.TextColumn("摘要", width="large"),
+                    "点评": st.column_config.TextColumn("点评", width="medium"),
+                },
+                hide_index=True, 
+                use_container_width=True
+            )
     else:
         st.info("👋 暂无阅读记录。请在左侧勾选账号并点击「开始阅读」。")
-
+       
 # ==========================================
 # 5. 主程序逻辑
 # ==========================================
