@@ -103,7 +103,7 @@ class WxSource:
 
 class AIAnalyst:
     def __init__(self, key, debug=False):
-        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
+        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
         self.debug = debug
         self.key = key
 
