@@ -16,7 +16,7 @@ from streamlit_gsheets import GSheetsConnection
 PAGE_TITLE = "WeRead AI (微读精选)"
 PAGE_ICON = "📖"
 DEFAULT_XML_PATH = "WeChat Official Accounts List.xml"
-EXPECTED_COLS = ["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"] # 🔒 锁定标准列名
+EXPECTED_COLS = ["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"]
 
 # ⚠️ Skill: 毒舌审计师
 SYSTEM_INSTRUCTION = """
@@ -33,7 +33,7 @@ SYSTEM_INSTRUCTION = """
 """
 
 # ==========================================
-# 2. 数据层 (防崩溃版)
+# 2. 数据层
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -46,17 +46,10 @@ class DataManager:
         if not self.enabled: return pd.DataFrame(columns=EXPECTED_COLS)
         try:
             df = self.conn.read(ttl=0)
-            # 🛡️ 防御性清洗：只要标准列，多余的不要，缺少的补齐
             if df.empty: return pd.DataFrame(columns=EXPECTED_COLS)
-            
-            # 补齐缺失列
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
-            
-            # 只取标准列 (剔除英文脏列)
             df = df[EXPECTED_COLS]
-            
-            # 类型清洗
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
             df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
@@ -66,9 +59,7 @@ class DataManager:
     def save_data(self, new_df):
         if not self.enabled: return new_df
         try:
-            # 🛡️ 写入前清洗
             new_df = new_df[EXPECTED_COLS]
-            
             old = self.load_data()
             combined = pd.concat([new_df, old], ignore_index=True).drop_duplicates(subset=['原文'], keep='first')
             combined = combined.sort_values(by=["日期", "时间"], ascending=False)
@@ -79,7 +70,7 @@ class DataManager:
             return new_df
 
 # ==========================================
-# 3. 服务层
+# 3. 服务层 (增强 Debug)
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -90,8 +81,14 @@ class WxSource:
     def get_scoped_articles(self, wxid, days=0):
         dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
         try:
+            # Debug Log
+            if self.debug: st.write(f"Checking WxID: {wxid}...")
+            
             r = requests.get(self.list_api, params={"key": self.key, "wxid": wxid}, timeout=10).json()
-            if self.debug: st.write(f"🔍 [Wx] {wxid}: {r.get('code')}")
+            
+            if self.debug and str(r.get("code")) != "0": 
+                st.error(f"⚠️ WxList Error: {r}")
+
             if str(r.get("code")) == "0":
                 return [{"title": i.get("title") or i.get("msg_title"), 
                          "url": i.get("url") or i.get("art_url"), 
@@ -100,26 +97,60 @@ class WxSource:
                         for i in (r.get("data", {}).get("list", []) or r.get("data", [])) 
                         if any((i.get("pub_time") or "").startswith(d) for d in dates)]
             return []
-        except: return []
+        except Exception as e:
+            if self.debug: st.error(f"❌ WxSource Crash: {str(e)}")
+            return []
 
     def fetch_content(self, url):
         try:
             r = requests.post(self.content_api, json={"key": self.key, "url": url}, timeout=20).json()
             return r.get("data", {}).get("text", "")[:8000] if str(r.get("code")) == "0" else ""
-        except: return ""
+        except Exception as e:
+            if self.debug: st.error(f"❌ Content Fetch Crash: {str(e)}")
+            return ""
 
 class AIAnalyst:
     def __init__(self, key, debug=False):
+        # 尝试使用 gemini-2.0-flash
         self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
         self.debug = debug
+        self.key = key
+
+    def test_connection(self):
+        """测试 Gemini 是否通畅"""
+        try:
+            payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
+            r = requests.post(self.url, json=payload, timeout=10)
+            return r.status_code, r.text
+        except Exception as e:
+            return 0, str(e)
 
     def analyze(self, text, title):
         try:
-            r = requests.post(self.url, json={"system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]}, timeout=30)
-            if self.debug and r.status_code != 200: st.error(f"Gemini: {r.text}")
+            payload = {
+                "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
+                "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
+            }
+            r = requests.post(self.url, json=payload, timeout=30)
+            
+            # 🐞 关键调试点：打印非 200 的错误
+            if self.debug:
+                if r.status_code != 200:
+                    st.error(f"❌ Gemini API Error ({r.status_code}): {r.text}")
+                else:
+                    st.caption(f"✅ Gemini Success: {title[:10]}...")
+
             if r.status_code != 200: return None
-            return json.loads(re.search(r'\{.*\}', r.json()['candidates'][0]['content']['parts'][0]['text'], re.DOTALL).group(0))
-        except: return None
+            
+            # 解析 JSON
+            raw = r.json()['candidates'][0]['content']['parts'][0]['text']
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            return json.loads(match.group(0)) if match else None
+            
+        except Exception as e:
+            # 🐞 打印 Python 级别的错误（如 JSON 解析失败、网络断连）
+            if self.debug: st.error(f"❌ Analyst Crash: {str(e)}")
+            return None
 
 # ==========================================
 # 4. 辅助函数
@@ -144,13 +175,13 @@ def init_state():
         st.session_state.config_list = df if df is not None else pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴 (演示)", "启用": True}])
 
 # ==========================================
-# 5. 界面渲染 (✨ 修复 Key 显示逻辑)
+# 5. 界面渲染
 # ==========================================
 def render_sidebar():
     with st.sidebar:
         st.title(f"{PAGE_ICON} WeRead AI")
         
-        # 🟢 修复点：恢复显式判断逻辑，给足“安全感”
+        # Key 配置 (显式判断版)
         if "WX_KEY" in st.secrets:
             wx_key = st.secrets["WX_KEY"]
             st.success("✅ WxRank Key 已云端加载")
@@ -168,6 +199,14 @@ def render_sidebar():
         debug = c1.toggle("🐞 Debug", False)
         force = c2.toggle("⚡ 强刷", False)
         
+        # 🧪 Debug 专属工具
+        if debug and gemini_key:
+            if st.button("🧪 测试 Gemini 连通性", width="stretch"):
+                ana = AIAnalyst(gemini_key, debug=True)
+                code, msg = ana.test_connection()
+                if code == 200: st.toast("✅ Gemini 连接成功！", icon="🎉")
+                else: st.error(f"连接失败 ({code}): {msg}")
+
         time_scope = st.selectbox("📅 范围", [0, 1], format_func=lambda x: "仅今日" if x == 0 else "近48小时")
         
         if u := st.file_uploader("📂 导入XML", "xml"):
@@ -207,7 +246,6 @@ def render_sidebar():
 
 def render_results():
     if not st.session_state.history_df.empty:
-        # 头部工具栏
         col1, col2 = st.columns([1.5, 1])
         with col1:
             raw_dates = st.session_state.history_df['日期'].astype(str).dropna().unique().tolist()
@@ -220,7 +258,6 @@ def render_results():
         df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
         
         if show_table:
-            # 表格模式
             def style(v):
                 if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
                 elif v >= 6: return 'background-color: #cce5ff; color: #004085'
@@ -235,37 +272,28 @@ def render_results():
             st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
 
         else:
-            # 卡片模式
             if df.empty: st.info("📭 无记录")
-            
             for _, row in df.sort_values(["日期", "时间"], ascending=False).iterrows():
                 try: score = int(row['价值'])
                 except: score = 0
-                
-                if score >= 8: color, icon = "green", "🟢"
-                elif score >= 6: color, icon = "blue", "🔵"
-                elif score >= 3: color, icon = "orange", "🟡"
-                else: color, icon = "red", "🔴"
+                if score >= 8: color = "green"
+                elif score >= 6: color = "blue"
+                elif score >= 3: color = "orange"
+                else: color = "red"
 
                 with st.container(border=True):
                     c_head, c_score = st.columns([3.5, 1])
                     c_head.markdown(f"**{row['标题']}**")
                     c_score.markdown(f":{color}[**{score}分**]")
-                    
                     st.caption(f"💡 {row['摘要']}")
                     if row['点评'] and len(str(row['点评'])) > 1:
                         st.markdown(f"<small style='color:gray'>💬 {row['点评']}</small>", unsafe_allow_html=True)
-                    
                     c_meta, c_btn = st.columns([2, 1.2])
-                    with c_meta:
-                        st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
+                    with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
                     with c_btn:
-                        # 🛡️ 安全链接检查
                         url = str(row['原文']).strip()
-                        if url and url.startswith("http"):
-                            st.link_button("👉 阅读全文", url, type="primary", width="stretch")
-                        else:
-                            st.button("🚫 无链接", disabled=True, width="stretch", key=f"btn_{row.name}")
+                        if url.startswith("http"): st.link_button("👉 阅读全文", url, type="primary", width="stretch")
+                        else: st.button("🚫 无链接", disabled=True, width="stretch", key=f"btn_{row.name}")
 
     else:
         st.info("👋 暂无记录，请点击侧边栏「🚀 开始」")
@@ -286,6 +314,9 @@ def main():
     if run:
         if not gem: st.error("❌ 缺Key")
         else:
+            # 🐞 如果 Debug 开启，显示调试控制台
+            if dbg: st.warning("🐞 调试模式已开启：正在输出详细 API 日志...")
+            
             src, ana = WxSource(wx, dbg), AIAnalyst(gem, dbg)
             targets = st.session_state.config_list[st.session_state.config_list["启用"]==True]
             
@@ -305,17 +336,12 @@ def main():
                     for a in src.get_scoped_articles(r.ID, scope):
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
+                                # 🔍 分析阶段
                                 if res := ana.analyze(txt, a['title']):
-                                    # 显式构造字典，防止脏数据注入
                                     new_data.append({
-                                        "日期": a['date'], 
-                                        "时间": a['full_time'][11:16],
-                                        "公众号": r.公众号, 
-                                        "标题": a['title'], 
-                                        "价值": res.get('score', 0), 
-                                        "摘要": res.get('summary', ''), 
-                                        "点评": res.get('suggestion', ''), 
-                                        "原文": a['url']
+                                        "日期": a['date'], "时间": a['full_time'][11:16], "公众号": r.公众号, 
+                                        "标题": a['title'], "价值": res.get('score', 0), "摘要": res.get('summary', ''), 
+                                        "点评": res.get('suggestion', ''), "原文": a['url']
                                     })
                     bar.progress((i+1)/len(targets))
                 
