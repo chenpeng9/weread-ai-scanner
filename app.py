@@ -47,7 +47,9 @@ class DataManager:
         try:
             df = self.conn.read(ttl=0)
             if df.empty or not all(c in df.columns for c in cols): return pd.DataFrame(columns=cols)
+            # 强制清理数据类型，防止后续报错
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
+            df['日期'] = df['日期'].astype(str) # 确保日期是字符串
             return df
         except: return pd.DataFrame(columns=cols)
 
@@ -127,7 +129,7 @@ def init_state():
         st.session_state.config_list = df if df is not None else pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴 (演示)", "启用": True}])
 
 # ==========================================
-# 5. 界面渲染 (✨ UI 重构版)
+# 5. 界面渲染
 # ==========================================
 def render_sidebar():
     with st.sidebar:
@@ -170,7 +172,6 @@ def render_sidebar():
 
         st.divider()
         c1, c2 = st.columns(2)
-        # ⚠️ 修复：use_container_width -> width="stretch"
         trigger = c1.button("🚀 开始", type="primary", width="stretch") 
         if c2.button("🗑️ 清空", width="stretch"):
             st.session_state.history_df = st.session_state.history_df.iloc[0:0]
@@ -181,16 +182,25 @@ def render_sidebar():
 def render_results():
     if not st.session_state.history_df.empty:
         # --- 顶部工具栏 ---
-        # ⚠️ 优化：将统计、导出、日期筛选、视图切换做得更紧凑
         col1, col2 = st.columns([1.5, 1])
         with col1:
-            all_dates = ["全部"] + sorted(st.session_state.history_df['日期'].unique().tolist(), reverse=True)
+            # ⚠️ 修复核心：数据清洗
+            # 1. 确保是字符串 2. 去除空值 3. 排序
+            raw_dates = st.session_state.history_df['日期'].astype(str).dropna().unique().tolist()
+            # 过滤掉可能的 'nan' 字符串
+            valid_dates = [d for d in raw_dates if d.lower() != 'nan' and len(d) > 0]
+            all_dates = ["全部"] + sorted(valid_dates, reverse=True)
+            
             sel_date = st.selectbox("📅 日期回溯", all_dates, label_visibility="collapsed")
         with col2:
-            show_table = st.toggle("📋 表格", False) # 用开关代替 Tab，节省空间
+            show_table = st.toggle("📋 表格", False)
 
         # 数据过滤
-        df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'] == sel_date]
+        if sel_date == "全部":
+            df = st.session_state.history_df
+        else:
+            # 确保比较时双方都是字符串
+            df = st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
         
         # --- 核心视图渲染 ---
         if show_table:
@@ -204,43 +214,36 @@ def render_results():
                 column_config={"原文": st.column_config.LinkColumn("🔗"), "价值": st.column_config.NumberColumn("分")},
                 hide_index=True, width="stretch", height=600
             )
-            # 导出按钮放在表格模式下
             b = io.BytesIO()
             with pd.ExcelWriter(b, engine='xlsxwriter') as w: df.to_excel(w, index=False)
             st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
 
         else:
-            # 📱 手机/卡片模式 (极简优化)
+            # 📱 手机/卡片模式
             if df.empty: st.info("📭 无记录")
             
             for _, row in df.sort_values(["日期", "时间"], ascending=False).iterrows():
-                score = int(row['价值']) if str(row['价值']).isdigit() else 0
+                try: score = int(row['价值'])
+                except: score = 0
                 
-                # 颜色逻辑
                 if score >= 8: color, icon = "green", "🟢"
                 elif score >= 6: color, icon = "blue", "🔵"
                 elif score >= 3: color, icon = "orange", "🟡"
                 else: color, icon = "red", "🔴"
 
                 with st.container(border=True):
-                    # 第一行：标题 + 分数徽章 (左右布局)
                     c_head, c_score = st.columns([3.5, 1])
                     c_head.markdown(f"**{row['标题']}**")
-                    c_score.markdown(f":{color}[**{score}分**]") # 使用 Streamlit 颜色语法
+                    c_score.markdown(f":{color}[**{score}分**]")
                     
-                    # 第二行：摘要 (紧凑)
                     st.caption(f"💡 {row['摘要']}")
-                    
-                    # 第三行：点评 (如果有)
                     if row['点评'] and len(str(row['点评'])) > 1:
                         st.markdown(f"<small style='color:gray'>💬 {row['点评']}</small>", unsafe_allow_html=True)
                     
-                    # 第四行：元数据 + 按钮
                     c_meta, c_btn = st.columns([2, 1.2])
                     with c_meta:
-                        st.caption(f"{row['时间'][5:16]} | {row['公众号']}")
+                        st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
                     with c_btn:
-                        # ⚠️ 优化：使用 Primary 样式，且全宽
                         st.link_button("👉 阅读全文", row['原文'], type="primary", width="stretch")
 
     else:
@@ -252,17 +255,13 @@ def render_results():
 def main():
     st.set_page_config(PAGE_TITLE, PAGE_ICON, layout="wide")
     init_state()
-    
-    # 侧边栏
     wx, gem, scope, run, dbg, frc = render_sidebar()
     
-    # 顶部标题 (更紧凑)
     c_t1, c_t2 = st.columns([3, 1])
     c_t1.title(f"{PAGE_ICON} {PAGE_TITLE}")
     if not st.session_state.history_df.empty:
         c_t2.metric("已读", len(st.session_state.history_df))
 
-    # 执行逻辑
     if run:
         if not gem: st.error("❌ 缺Key")
         else:
@@ -275,7 +274,11 @@ def main():
                 today = datetime.now().strftime('%Y-%m-%d')
                 
                 for i, r in enumerate(targets.itertuples()):
-                    if not frc and not st.session_state.history_df[(st.session_state.history_df['公众号']==r.公众号)&(st.session_state.history_df['日期']==today)].empty:
+                    # ⚠️ 修复：比较前确保格式一致
+                    if not frc and not st.session_state.history_df[
+                        (st.session_state.history_df['公众号']==r.公众号) & 
+                        (st.session_state.history_df['日期'].astype(str)==today)
+                    ].empty:
                         st.toast(f"⏭️ 跳过 {r.公众号}"); bar.progress((i+1)/len(targets)); continue
                         
                     st.toast(f"📖 {r.公众号}")
