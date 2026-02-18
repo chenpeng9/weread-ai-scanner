@@ -12,11 +12,12 @@ from datetime import datetime, timedelta
 # ==========================================
 # 1. 全局配置与核心指令
 # ==========================================
-PAGE_TITLE = "WeRead AI"
-PAGE_ICON = "🎯"
+# ✨ 修改点 1：名称回归“微读精选”
+PAGE_TITLE = "WeRead AI (微读精选)"
+PAGE_ICON = "📖"
 DEFAULT_XML_PATH = "WeChat Official Accounts List.xml"
 
-# ⚠️ 核心 Skill：毒舌做空机构分析师
+# ⚠️ 核心 Skill：毒舌做空机构分析师 (完全保留，未修改)
 SYSTEM_INSTRUCTION = """
 【角色】你是一位像“浑水调研”一样毒辣、冷血的顶级做空机构分析师。你对市场噪音极度不耐烦，对“割韭菜”的行为深恶痛绝。
 
@@ -81,7 +82,6 @@ class WxSource:
 
 class AIAnalyst:
     def __init__(self, api_key):
-        # 默认使用 1.5-flash，如确认有 3.0 权限可改为 gemini-3-flash
         self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
 
     def analyze(self, text, title):
@@ -130,32 +130,30 @@ def init_session_state():
             st.session_state.config_list = pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴 (演示)", "启用": True}])
 
 # ==========================================
-# 4. 界面渲染 (逻辑修复核心)
+# 4. 界面渲染
 # ==========================================
 def render_sidebar():
     with st.sidebar:
-        st.title(f"{PAGE_ICON} WeRead Alpha")
+        st.title(f"{PAGE_ICON} WeRead AI")
         
-        # --- A. 密钥配置 (修复版：逻辑分离) ---
-        # 1. WxRank Key
+        # --- A. 密钥配置 ---
         if "WX_KEY" in st.secrets:
             wx_key = st.secrets["WX_KEY"]
             st.success("✅ WxRank Key 已云端加载")
         else:
-            wx_key = st.text_input("WxRank API Key", value="5e1bde783213147e8907")
+            wx_key = st.text_input("WxRank API Key", type="password")
 
-        # 2. Gemini Key
         if "GEMINI_KEY" in st.secrets:
             gemini_key = st.secrets["GEMINI_KEY"]
             st.success("✅ Gemini Key 已云端加载")
         else:
             gemini_key = st.text_input("Gemini API Key", type="password")
             if not gemini_key:
-                st.info("👆 请输入 Gemini Key 以启用 AI 分析")
+                st.info("👆 请输入 Gemini Key 以启用阅读助手")
 
         st.divider()
         
-        # --- B. 阅读范围 ---
+        # --- B. 范围设置 (✨ 修改点：文案改为“阅读”) ---
         time_scope = st.selectbox("📅 阅读范围", options=[0, 1], format_func=lambda x: "仅今日 (24h)" if x == 0 else "今日 + 昨日 (48h)")
         
         # --- C. 手动导入 ---
@@ -174,12 +172,12 @@ def render_sidebar():
         st.divider()
         st.subheader("📁 账号管理")
 
-        # --- D. 批量操作 ---
+        # --- D. 批量操作 (width 已修复) ---
         col_b1, col_b2 = st.columns(2)
-        if col_b1.button("✅ 全选", use_container_width=True):
+        if col_b1.button("✅ 全选", width="stretch"):
             st.session_state.config_list["启用"] = True
             st.rerun()
-        if col_b2.button("⬜ 全不选", use_container_width=True):
+        if col_b2.button("⬜ 全不选", width="stretch"):
             st.session_state.config_list["启用"] = False
             st.rerun()
 
@@ -198,10 +196,10 @@ def render_sidebar():
                     "公众号": st.column_config.TextColumn(width="medium", disabled=True),
                     "ID": None
                 },
-                hide_index=True, use_container_width=True, height=400
+                hide_index=True, width="stretch", height=400
             )
             
-            if st.form_submit_button("💾 保存状态", type="primary", use_container_width=True):
+            if st.form_submit_button("💾 保存状态", type="primary", width="stretch"):
                 st.session_state.config_list = edited_df.drop(columns=['序号'])[['ID', '公众号', '启用']]
                 st.toast("✅ 账号状态已锁定")
                 time.sleep(0.5)
@@ -209,10 +207,10 @@ def render_sidebar():
 
         st.divider()
         
-        # --- F. 主操作区 ---
+        # --- F. 主操作区 (✨ 修改点：文案改为“开始阅读”) ---
         c1, c2 = st.columns(2)
-        trigger = c1.button("🚀 开始阅读", type="primary", use_container_width=True)
-        if c2.button("🗑️ 清空历史", use_container_width=True):
+        trigger = c1.button("🚀 开始阅读", type="primary", width="stretch")
+        if c2.button("🗑️ 清空历史", width="stretch"):
             st.session_state.history_df = st.session_state.history_df.iloc[0:0]
             st.rerun()
             
@@ -221,19 +219,20 @@ def render_sidebar():
 def render_results():
     if not st.session_state.history_df.empty:
         c1, c2 = st.columns([1, 4])
-        c1.metric("今日捕获", len(st.session_state.history_df))
+        # ✨ 修改点：文案
+        c1.metric("今日已读", len(st.session_state.history_df))
         
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            st.session_state.history_df.to_excel(writer, index=False, sheet_name='AuditReport')
-            ws = writer.sheets['AuditReport']
+            st.session_state.history_df.to_excel(writer, index=False, sheet_name='WeRead_Report')
+            ws = writer.sheets['WeRead_Report']
             ws.set_column('D:D', 40)
             ws.set_column('F:F', 60)
             
         c2.download_button(
-            label="📥 导出研报 (Excel)",
+            label="📥 导出阅读笔记 (Excel)",
             data=buffer.getvalue(),
-            file_name=f"WeRead_Audit_{datetime.now().strftime('%m%d')}.xlsx",
+            file_name=f"WeRead_Notes_{datetime.now().strftime('%m%d')}.xlsx",
             mime="application/vnd.ms-excel"
         )
 
@@ -256,10 +255,11 @@ def render_results():
                 "摘要": st.column_config.TextColumn("核心摘要", width="large"),
                 "点评": st.column_config.TextColumn("毒舌点评", width="medium"),
             },
-            hide_index=True, use_container_width=True, height=600
+            hide_index=True, width="stretch", height=600
         )
     else:
-        st.info("👋 暂无情报。请在左侧勾选账号并点击「开始阅读」。")
+        # ✨ 修改点：空状态提示
+        st.info("👋 暂无阅读记录。请在左侧勾选账号并点击「开始阅读」。")
 
 # ==========================================
 # 5. 主程序逻辑
@@ -269,7 +269,9 @@ def main():
     init_session_state()
     
     wx_key, gemini_key, time_scope, trigger = render_sidebar()
-    st.title(f"{PAGE_ICON} {PAGE_TITLE} | 微读精选")
+    
+    # ✨ 修改点：主标题
+    st.title(f"{PAGE_ICON} {PAGE_TITLE}")
 
     if trigger:
         if not gemini_key:
@@ -279,7 +281,7 @@ def main():
             analyst = AIAnalyst(gemini_key)
             active_list = st.session_state.config_list[st.session_state.config_list["启用"] == True]
             
-            st.toast(f"🎯 任务启动：锁定 {len(active_list)} 个目标")
+            st.toast(f"🎯 任务启动：准备阅读 {len(active_list)} 个公众号")
             
             if active_list.empty:
                 st.warning("⚠️ 列表为空！请先勾选账号并点击【💾 保存状态】。")
@@ -287,7 +289,7 @@ def main():
                 progress_bar = st.progress(0)
                 new_records = []
                 for idx, row in enumerate(active_list.itertuples()):
-                    st.toast(f"🕵️‍♂️ 阅读: {row.公众号}...")
+                    st.toast(f"📖 正在阅读: {row.公众号}...")
                     articles = source.get_scoped_articles(row.ID, days_back=time_scope)
                     for art in articles:
                         if not (st.session_state.history_df['原文'] == art['url']).any():
@@ -309,11 +311,11 @@ def main():
                 
                 if new_records:
                     st.session_state.history_df = pd.concat([pd.DataFrame(new_records), st.session_state.history_df], ignore_index=True)
-                    st.success(f"✅ 阅读完成，新增 {len(new_records)} 条情报")
+                    st.success(f"✅ 阅读完成，更新 {len(new_records)} 篇文章")
                     time.sleep(1)
                     st.rerun()
                 else:
-                    st.toast("✅ 扫描完成，今日暂无新内容")
+                    st.toast("✅ 阅读完成，今日暂无更新")
 
     render_results()
 
