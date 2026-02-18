@@ -111,7 +111,7 @@ with st.sidebar:
         wx_key = st.secrets["WX_KEY"]
         st.success("✅ WxRank Key 已从云端加载")
     else:
-        wx_key = st.text_input("WxRank API Key", value="5e1bde783213147e8907")
+        wx_key = st.text_input("WxRank API Key", type="password")
         
     if "GEMINI_KEY" in st.secrets:
         gemini_key = st.secrets["GEMINI_KEY"]
