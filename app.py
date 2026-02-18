@@ -101,7 +101,7 @@ class WxSource:
 
 class AIAnalyst:
     def __init__(self, api_key, debug_mode=False):
-        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent?key={api_key}"
         self.debug_mode = debug_mode
 
     def analyze(self, text, title):
