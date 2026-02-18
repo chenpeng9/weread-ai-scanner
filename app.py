@@ -70,7 +70,7 @@ class DataManager:
             return new_df
 
 # ==========================================
-# 3. 服务层 (增强 Debug)
+# 3. 服务层 (🛡️ 抗 429 限流版)
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -81,14 +81,8 @@ class WxSource:
     def get_scoped_articles(self, wxid, days=0):
         dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
         try:
-            # Debug Log
-            if self.debug: st.write(f"Checking WxID: {wxid}...")
-            
             r = requests.get(self.list_api, params={"key": self.key, "wxid": wxid}, timeout=10).json()
-            
-            if self.debug and str(r.get("code")) != "0": 
-                st.error(f"⚠️ WxList Error: {r}")
-
+            if self.debug and str(r.get("code")) != "0": st.error(f"⚠️ WxList Error: {r}")
             if str(r.get("code")) == "0":
                 return [{"title": i.get("title") or i.get("msg_title"), 
                          "url": i.get("url") or i.get("art_url"), 
@@ -98,57 +92,57 @@ class WxSource:
                         if any((i.get("pub_time") or "").startswith(d) for d in dates)]
             return []
         except Exception as e:
-            if self.debug: st.error(f"❌ WxSource Crash: {str(e)}")
+            if self.debug: st.error(f"❌ WxSource: {str(e)}")
             return []
 
     def fetch_content(self, url):
         try:
             r = requests.post(self.content_api, json={"key": self.key, "url": url}, timeout=20).json()
             return r.get("data", {}).get("text", "")[:8000] if str(r.get("code")) == "0" else ""
-        except Exception as e:
-            if self.debug: st.error(f"❌ Content Fetch Crash: {str(e)}")
-            return ""
+        except: return ""
 
 class AIAnalyst:
     def __init__(self, key, debug=False):
-        # 尝试使用 gemini-2.0-flash
         self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
         self.debug = debug
         self.key = key
 
     def test_connection(self):
-        """测试 Gemini 是否通畅"""
         try:
             payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
             r = requests.post(self.url, json=payload, timeout=10)
             return r.status_code, r.text
-        except Exception as e:
-            return 0, str(e)
+        except Exception as e: return 0, str(e)
 
     def analyze(self, text, title):
+        # 🛡️ 策略 1：主动降速 (每次调用前强制休息 3 秒)
+        # 免费版 Gemini 一般限制 15 RPM (每分钟15次)，也就是 4秒/次
+        time.sleep(4) 
+        
+        payload = {
+            "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
+            "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
+        }
+        
         try:
-            payload = {
-                "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
-                "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
-            }
             r = requests.post(self.url, json=payload, timeout=30)
             
-            # 🐞 关键调试点：打印非 200 的错误
-            if self.debug:
-                if r.status_code != 200:
-                    st.error(f"❌ Gemini API Error ({r.status_code}): {r.text}")
-                else:
-                    st.caption(f"✅ Gemini Success: {title[:10]}...")
+            # 🛡️ 策略 2：遇到 429 自动重试
+            if r.status_code == 429:
+                if self.debug: st.warning("⚠️ 触发 Gemini 限流 (429)，正在冷却 12 秒后重试...")
+                time.sleep(12) # 冷却
+                r = requests.post(self.url, json=payload, timeout=30) # 重试一次
+            
+            if self.debug and r.status_code != 200:
+                st.error(f"❌ Gemini Error ({r.status_code}): {r.text}")
 
             if r.status_code != 200: return None
             
-            # 解析 JSON
             raw = r.json()['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             return json.loads(match.group(0)) if match else None
             
         except Exception as e:
-            # 🐞 打印 Python 级别的错误（如 JSON 解析失败、网络断连）
             if self.debug: st.error(f"❌ Analyst Crash: {str(e)}")
             return None
 
@@ -180,26 +174,19 @@ def init_state():
 def render_sidebar():
     with st.sidebar:
         st.title(f"{PAGE_ICON} WeRead AI")
-        
-        # Key 配置 (显式判断版)
         if "WX_KEY" in st.secrets:
-            wx_key = st.secrets["WX_KEY"]
-            st.success("✅ WxRank Key 已云端加载")
-        else:
-            wx_key = st.text_input("WxRank API Key", type="password")
+            wx_key = st.secrets["WX_KEY"]; st.success("✅ WxRank Key 已云端加载")
+        else: wx_key = st.text_input("WxRank API Key", type="password")
 
         if "GEMINI_KEY" in st.secrets:
-            gemini_key = st.secrets["GEMINI_KEY"]
-            st.success("✅ Gemini Key 已云端加载")
-        else:
-            gemini_key = st.text_input("Gemini API Key", type="password")
+            gemini_key = st.secrets["GEMINI_KEY"]; st.success("✅ Gemini Key 已云端加载")
+        else: gemini_key = st.text_input("Gemini API Key", type="password")
         
         st.divider()
         c1, c2 = st.columns(2)
         debug = c1.toggle("🐞 Debug", False)
         force = c2.toggle("⚡ 强刷", False)
         
-        # 🧪 Debug 专属工具
         if debug and gemini_key:
             if st.button("🧪 测试 Gemini 连通性", width="stretch"):
                 ana = AIAnalyst(gemini_key, debug=True)
@@ -314,9 +301,7 @@ def main():
     if run:
         if not gem: st.error("❌ 缺Key")
         else:
-            # 🐞 如果 Debug 开启，显示调试控制台
             if dbg: st.warning("🐞 调试模式已开启：正在输出详细 API 日志...")
-            
             src, ana = WxSource(wx, dbg), AIAnalyst(gem, dbg)
             targets = st.session_state.config_list[st.session_state.config_list["启用"]==True]
             
