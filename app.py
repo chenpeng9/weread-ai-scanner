@@ -33,7 +33,7 @@ SYSTEM_INSTRUCTION = """
 """
 
 # ==========================================
-# 2. 数据层 (修复版)
+# 2. 数据层 (防崩溃版)
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -53,12 +53,12 @@ class DataManager:
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
             
-            # 只取标准列
+            # 只取标准列 (剔除英文脏列)
             df = df[EXPECTED_COLS]
             
-            # 类型清洗：防止 NaN 导致报错
+            # 类型清洗
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
-            df['原文'] = df['原文'].fillna("").astype(str) # 防止 URL 为空报错
+            df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
             return df
         except: return pd.DataFrame(columns=EXPECTED_COLS)
@@ -66,7 +66,7 @@ class DataManager:
     def save_data(self, new_df):
         if not self.enabled: return new_df
         try:
-            # 🛡️ 写入前清洗：确保只写入标准列
+            # 🛡️ 写入前清洗
             new_df = new_df[EXPECTED_COLS]
             
             old = self.load_data()
@@ -144,13 +144,24 @@ def init_state():
         st.session_state.config_list = df if df is not None else pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴 (演示)", "启用": True}])
 
 # ==========================================
-# 5. 界面渲染
+# 5. 界面渲染 (✨ 修复 Key 显示逻辑)
 # ==========================================
 def render_sidebar():
     with st.sidebar:
         st.title(f"{PAGE_ICON} WeRead AI")
-        wx_key = st.secrets.get("WX_KEY", st.text_input("WxRank Key", type="password"))
-        gemini_key = st.secrets.get("GEMINI_KEY", st.text_input("Gemini Key", type="password"))
+        
+        # 🟢 修复点：恢复显式判断逻辑，给足“安全感”
+        if "WX_KEY" in st.secrets:
+            wx_key = st.secrets["WX_KEY"]
+            st.success("✅ WxRank Key 已云端加载")
+        else:
+            wx_key = st.text_input("WxRank API Key", type="password")
+
+        if "GEMINI_KEY" in st.secrets:
+            gemini_key = st.secrets["GEMINI_KEY"]
+            st.success("✅ Gemini Key 已云端加载")
+        else:
+            gemini_key = st.text_input("Gemini API Key", type="password")
         
         st.divider()
         c1, c2 = st.columns(2)
@@ -249,7 +260,7 @@ def render_results():
                     with c_meta:
                         st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
                     with c_btn:
-                        # 🛡️ 修复核心：如果 URL 无效，按钮会报错，这里加判断
+                        # 🛡️ 安全链接检查
                         url = str(row['原文']).strip()
                         if url and url.startswith("http"):
                             st.link_button("👉 阅读全文", url, type="primary", width="stretch")
@@ -295,7 +306,7 @@ def main():
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
                                 if res := ana.analyze(txt, a['title']):
-                                    # 🛡️ 修复核心：显式构造字典，防止 **a 把英文 key 混进去
+                                    # 显式构造字典，防止脏数据注入
                                     new_data.append({
                                         "日期": a['date'], 
                                         "时间": a['full_time'][11:16],
