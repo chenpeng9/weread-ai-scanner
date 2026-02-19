@@ -28,8 +28,8 @@ SYSTEM_INSTRUCTION = """
 * 6-7分 (合格)：有基本的数据支撑和逻辑推演。
 * 8-10分 (Alpha)：极其稀缺的行业内幕、深度的宏观推演。
 【输出要求】
-1. 摘要：80字内。
-2. 点评：25字内毒舌点评。
+1. 摘要：50字内。
+2. 点评：15字内毒舌点评。
 3. 必须输出纯 JSON，key 为 "summary", "score", "suggestion"。
 """
 
@@ -273,7 +273,7 @@ def render_sidebar():
         st.divider()
         c1, c2 = st.columns(2)
         trigger = c1.button("🚀 开始", type="primary", width="stretch") 
-        # 🟢 修复点：调用新的 reset_data 方法
+        # 🟢 核心修复点：这里的 reset_data 现在肯定存在了
         if c2.button("🗑️ 清空历史", width="stretch"):
             # 这里的逻辑是：调用核按钮 -> 重置 session -> 刷新
             st.session_state.history_df = st.session_state.data_manager.reset_data()
