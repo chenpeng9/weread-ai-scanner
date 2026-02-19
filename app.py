@@ -33,7 +33,7 @@ SYSTEM_INSTRUCTION = """
 """
 
 # ==========================================
-# 2. 数据层 (带防撞梁的稳定版)
+# 2. 数据层 (稳定版)
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -47,8 +47,7 @@ class DataManager:
         try:
             df = self.conn.read(ttl=0)
             
-            # 🛡️ 防撞梁：如果读出来的数据缺胳膊少腿，直接扔掉，返回空表
-            # 这能100%防止 KeyError
+            # 🛡️ 防撞梁：如果表头坏了，返回空表，防止读取崩溃
             if df.empty or '日期' not in df.columns:
                 return pd.DataFrame(columns=EXPECTED_COLS)
             
@@ -68,7 +67,10 @@ class DataManager:
     def save_data(self, new_df):
         if not self.enabled: return new_df
         try:
+            # 这里的 new_df 必须包含 EXPECTED_COLS 里的所有列
+            # 如果 main 函数没映射好，这里就会报错
             new_df = new_df[EXPECTED_COLS]
+            
             old = self.load_data()
             combined = pd.concat([new_df, old], ignore_index=True).drop_duplicates(subset=['原文'], keep='first')
             combined = combined.sort_values(by=["日期", "时间"], ascending=False)
@@ -114,7 +116,6 @@ class AIAnalyst:
     def __init__(self, key, debug=False):
         self.key = key
         self.debug = debug
-        # ✅ 2.0 和 2.5 负载均衡
         self.models = ["gemini-2.0-flash", "gemini-2.5-flash"]
 
     def _get_url(self, model_name):
@@ -178,12 +179,11 @@ def parse_xml(f):
 
 def init_state():
     if 'data_manager' not in st.session_state: st.session_state.data_manager = DataManager()
-    if 'history_df' not in st.session_state: 
-        st.session_state.history_df = st.session_state.data_manager.load_data()
+    if 'history_df' not in st.session_state: st.session_state.history_df = st.session_state.data_manager.load_data()
     
-    # 🛡️ 二次校验：如果 session 里的数据是坏的，立刻重置
+    # 🛡️ 再次防撞：如果缓存里的表坏了，就重置
     if '日期' not in st.session_state.history_df.columns:
-        st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
+         st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
 
     if 'config_list' not in st.session_state:
         df = parse_xml(DEFAULT_XML_PATH) if os.path.exists(DEFAULT_XML_PATH) else None
@@ -247,86 +247,86 @@ def render_sidebar():
         c1, c2 = st.columns(2)
         trigger = c1.button("🚀 开始", type="primary", width="stretch") 
         if c2.button("🗑️ 清空本次缓存", width="stretch"):
-            # 仅清空当前 Session，最安全的急救措施
             st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
             st.rerun()
             
         return wx_key, gemini_key, time_scope, trigger, debug, force
 
 def render_results():
-    # 🛡️ 终极防御：如果表是坏的，直接显示空，不让它报错
-    if st.session_state.history_df.empty or '日期' not in st.session_state.history_df.columns:
-        st.info("👋 暂无记录（或缓存已重置），请点击侧边栏「🚀 开始」")
-        return
+    if not st.session_state.history_df.empty:
+        col1, col2 = st.columns([1.5, 1])
+        with col1:
+            raw_dates = st.session_state.history_df['日期'].astype(str).dropna().unique().tolist()
+            valid_dates = [d for d in raw_dates if d.lower() != 'nan' and len(d) > 0]
+            all_dates = ["全部"] + sorted(valid_dates, reverse=True)
+            sel_date = st.selectbox("📅 日期回溯", all_dates, label_visibility="collapsed")
+        with col2:
+            show_table = st.toggle("📋 表格", False)
 
-    col1, col2 = st.columns([1.5, 1])
-    with col1:
-        raw_dates = st.session_state.history_df['日期'].astype(str).dropna().unique().tolist()
-        valid_dates = [d for d in raw_dates if d.lower() != 'nan' and len(d) > 0]
-        all_dates = ["全部"] + sorted(valid_dates, reverse=True)
-        sel_date = st.selectbox("📅 日期回溯", all_dates, label_visibility="collapsed")
-    with col2:
-        show_table = st.toggle("📋 表格", False)
+        df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
+        
+        if show_table:
+            # 🎨 表格模式 (4色)
+            def style_score(v):
+                try:
+                    v = int(v)
+                    if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
+                    elif v >= 6: return 'background-color: #cce5ff; color: #004085'
+                    elif v >= 3: return 'background-color: #fff3cd; color: #856404'
+                    else: return 'background-color: #f8d7da; color: #721c24'
+                except: return ''
 
-    df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
-    
-    if show_table:
-        def style_score(v):
-            try:
-                v = int(v)
-                if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
-                elif v >= 6: return 'background-color: #cce5ff; color: #004085'
-                elif v >= 3: return 'background-color: #fff3cd; color: #856404'
-                else: return 'background-color: #f8d7da; color: #721c24'
-            except: return ''
+            st.dataframe(
+                df.sort_values(["日期", "时间"], ascending=False).style.map(style_score, subset=['价值']),
+                column_config={
+                    "原文": st.column_config.LinkColumn("🔗", display_text="阅读"), 
+                    "价值": st.column_config.NumberColumn("分", format="%d"),
+                    "点评": st.column_config.TextColumn("点评", width="medium"),
+                    "摘要": st.column_config.TextColumn("摘要", width="large")
+                },
+                hide_index=True, width="stretch", height=600
+            )
+            b = io.BytesIO()
+            with pd.ExcelWriter(b, engine='xlsxwriter') as w: df.to_excel(w, index=False)
+            st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
 
-        st.dataframe(
-            df.sort_values(["日期", "时间"], ascending=False).style.map(style_score, subset=['价值']),
-            column_config={
-                "原文": st.column_config.LinkColumn("🔗", display_text="阅读"), 
-                "价值": st.column_config.NumberColumn("分", format="%d"),
-                "点评": st.column_config.TextColumn("点评", width="medium"),
-                "摘要": st.column_config.TextColumn("摘要", width="large")
-            },
-            hide_index=True, width="stretch", height=600
-        )
-        b = io.BytesIO()
-        with pd.ExcelWriter(b, engine='xlsxwriter') as w: df.to_excel(w, index=False)
-        st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
+        else:
+            # 卡片模式
+            sort_mode = st.radio("排序", ["⏱️ 时间倒序", "🔥 评分最高"], horizontal=True, label_visibility="collapsed")
+            if sort_mode == "🔥 评分最高":
+                df_sorted = df.sort_values(by=["价值", "日期", "时间"], ascending=[False, False, False])
+            else:
+                df_sorted = df.sort_values(by=["日期", "时间"], ascending=[False, False])
+
+            if df_sorted.empty: st.info("📭 无记录")
+            
+            for _, row in df_sorted.iterrows():
+                try: score = int(row['价值'])
+                except: score = 0
+                if score >= 8: color, icon = "green", "🟢"
+                elif score >= 6: color, icon = "blue", "🔵"
+                elif score >= 3: color, icon = "orange", "🟡"
+                else: color, icon = "red", "🔴"
+
+                with st.container(border=True):
+                    c_head, c_score = st.columns([3.5, 1])
+                    c_head.markdown(f"**{row['标题']}**")
+                    c_score.markdown(f":{color}[**{score}分**]")
+                    st.caption(f"💡 {row['摘要']}")
+                    
+                    comment = str(row['点评'])
+                    if comment and comment.lower() != "none" and len(comment) > 1:
+                        st.markdown(f"<small style='color:gray'>💬 {comment}</small>", unsafe_allow_html=True)
+                    
+                    c_meta, c_btn = st.columns([2, 1.2])
+                    with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
+                    with c_btn:
+                        url = str(row['原文']).strip()
+                        if url.startswith("http"): st.link_button("👉 阅读全文", url, type="primary", width="stretch")
+                        else: st.button("🚫 无链接", disabled=True, width="stretch", key=f"btn_{row.name}")
 
     else:
-        sort_mode = st.radio("排序", ["⏱️ 时间倒序", "🔥 评分最高"], horizontal=True, label_visibility="collapsed")
-        if sort_mode == "🔥 评分最高":
-            df_sorted = df.sort_values(by=["价值", "日期", "时间"], ascending=[False, False, False])
-        else:
-            df_sorted = df.sort_values(by=["日期", "时间"], ascending=[False, False])
-
-        if df_sorted.empty: st.info("📭 无记录")
-        
-        for _, row in df_sorted.iterrows():
-            try: score = int(row['价值'])
-            except: score = 0
-            if score >= 8: color, icon = "green", "🟢"
-            elif score >= 6: color, icon = "blue", "🔵"
-            elif score >= 3: color, icon = "orange", "🟡"
-            else: color, icon = "red", "🔴"
-
-            with st.container(border=True):
-                c_head, c_score = st.columns([3.5, 1])
-                c_head.markdown(f"**{row['标题']}**")
-                c_score.markdown(f":{color}[**{score}分**]")
-                st.caption(f"💡 {row['摘要']}")
-                
-                comment = str(row['点评'])
-                if comment and comment.lower() != "none" and len(comment) > 1:
-                    st.markdown(f"<small style='color:gray'>💬 {comment}</small>", unsafe_allow_html=True)
-                
-                c_meta, c_btn = st.columns([2, 1.2])
-                with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
-                with c_btn:
-                    url = str(row['原文']).strip()
-                    if url.startswith("http"): st.link_button("👉 阅读全文", url, type="primary", width="stretch")
-                    else: st.button("🚫 无链接", disabled=True, width="stretch", key=f"btn_{row.name}")
+        st.info("👋 暂无记录，请点击侧边栏「🚀 开始」")
 
 def main():
     st.set_page_config(PAGE_TITLE, PAGE_ICON, layout="wide")
@@ -334,8 +334,7 @@ def main():
     wx, gem, scope, run, dbg, frc = render_sidebar()
     c_t1, c_t2 = st.columns([3, 1])
     c_t1.title(f"{PAGE_ICON} {PAGE_TITLE}")
-    if not st.session_state.history_df.empty and '日期' in st.session_state.history_df.columns: 
-        c_t2.metric("已读", len(st.session_state.history_df))
+    if not st.session_state.history_df.empty: c_t2.metric("已读", len(st.session_state.history_df))
     
     if run:
         if not gem: st.error("❌ 缺Key")
@@ -348,19 +347,23 @@ def main():
                 bar, new_data = st.progress(0), []
                 today = datetime.now().strftime('%Y-%m-%d')
                 for i, r in enumerate(targets.itertuples()):
-                    if not frc and '日期' in st.session_state.history_df.columns and not st.session_state.history_df[(st.session_state.history_df['公众号']==r.公众号) & (st.session_state.history_df['日期'].astype(str)==today)].empty:
+                    if not frc and not st.session_state.history_df[(st.session_state.history_df['公众号']==r.公众号) & (st.session_state.history_df['日期'].astype(str)==today)].empty:
                         st.toast(f"⏭️ 跳过 {r.公众号}"); bar.progress((i+1)/len(targets)); continue
                     st.toast(f"📖 {r.公众号}")
                     for a in src.get_scoped_articles(r.ID, scope):
                         if '原文' in st.session_state.history_df.columns and not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
                                 if res := ana.analyze(txt, a['title']):
+                                    # 写入前最后一道清洗
                                     score = int(res.get('score', 0))
                                     comment = str(res.get('suggestion', '')).replace("None", "")
+                                    
+                                    # 🟢 关键修复：显式映射字段，防止 KeyError
                                     new_data.append({
-                                        **a, 
+                                        "日期": a['date'],    # a['date'] -> 日期
                                         "时间": a['full_time'][11:16], 
                                         "公众号": r.公众号, 
+                                        "标题": a['title'],   # a['title'] -> 标题
                                         "价值": score, 
                                         "摘要": str(res.get('summary', '')), 
                                         "点评": comment, 
