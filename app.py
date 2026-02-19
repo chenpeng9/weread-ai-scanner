@@ -19,7 +19,6 @@ PAGE_ICON = "📖"
 DEFAULT_XML_PATH = "WeChat Official Accounts List.xml"
 EXPECTED_COLS = ["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"]
 
-# ⚠️ Skill: 毒舌审计师
 SYSTEM_INSTRUCTION = """
 【角色】你是一位像“浑水调研”一样毒辣、冷血的顶级做空机构分析师。你对市场噪音极度不耐烦，对“割韭菜”的行为深恶痛绝。
 【评分标准 (0-10分)】
@@ -30,7 +29,7 @@ SYSTEM_INSTRUCTION = """
 【输出要求】
 1. 摘要：50字内。
 2. 点评：15字内毒舌点评。
-3. 必须输出纯 JSON。
+3. 必须输出纯 JSON，key 为 "summary", "score", "suggestion"。
 """
 
 # ==========================================
@@ -48,12 +47,21 @@ class DataManager:
         try:
             df = self.conn.read(ttl=0)
             if df.empty: return pd.DataFrame(columns=EXPECTED_COLS)
+            # 补齐列
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
             df = df[EXPECTED_COLS]
+            
+            # 🛠️ 强力清洗数据
+            # 1. 分数转整数
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
+            # 2. 点评去 None
+            df['点评'] = df['点评'].fillna("").astype(str).replace("None", "")
+            # 3. 其他转字符串
             df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
+            df['摘要'] = df['摘要'].fillna("").astype(str)
+            
             return df
         except: return pd.DataFrame(columns=EXPECTED_COLS)
 
@@ -71,7 +79,7 @@ class DataManager:
             return new_df
 
 # ==========================================
-# 3. 服务层 (🚀 3.0/2.0/2.5 三引擎版)
+# 3. 服务层 (🚀 3模型随机轮询 + 自动切换)
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -99,15 +107,14 @@ class WxSource:
     def fetch_content(self, url):
         try:
             r = requests.post(self.content_api, json={"key": self.key, "url": url}, timeout=20).json()
-            # 3.0 能力更强，可以处理更多上下文，这里放宽到 7000 字
-            return r.get("data", {}).get("text", "")[:7000] if str(r.get("code")) == "0" else ""
+            return r.get("data", {}).get("text", "")[:6000] if str(r.get("code")) == "0" else ""
         except: return ""
 
 class AIAnalyst:
     def __init__(self, key, debug=False):
         self.key = key
         self.debug = debug
-        # ✨ 梦幻阵容：3.0 领衔，2.0/2.5 替补
+        # ✨ 三兄弟齐上阵
         self.models = ["gemini-3-flash-preview", "gemini-2.0-flash", "gemini-2.5-flash"]
 
     def _get_url(self, model_name):
@@ -115,55 +122,52 @@ class AIAnalyst:
 
     def test_connection(self):
         try:
-            # 优先测试 3.0
-            model = self.models[0]
-            url = self._get_url(model)
-            payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
-            r = requests.post(url, json=payload, timeout=10)
+            model = self.models[1] # 测试 2.0，最稳
+            r = requests.post(self._get_url(model), json={"contents": [{"parts": [{"text": "Hello"}]}]}, timeout=10)
             return r.status_code, r.text
         except Exception as e: return 0, str(e)
 
+    def _try_request(self, model, payload):
+        try:
+            # ⏱️ 统一 30s 超时
+            timeout = 30
+            if self.debug: st.caption(f"🤖 正在调用: {model}...")
+            
+            r = requests.post(self._get_url(model), json=payload, timeout=timeout)
+            
+            if r.status_code == 200:
+                raw = r.json()['candidates'][0]['content']['parts'][0]['text']
+                match = re.search(r'\{.*\}', raw, re.DOTALL)
+                return json.loads(match.group(0)) if match else None
+            else:
+                if self.debug: st.warning(f"⚠️ {model} 异常 ({r.status_code})")
+                return None
+        except Exception as e:
+            if self.debug: st.warning(f"⚠️ {model} 失败: {str(e)}")
+            return None
+
     def analyze(self, text, title):
-        # 极速响应
-        time.sleep(0.3) 
-        
+        time.sleep(0.3)
         payload = {
             "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
             "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
         }
-        
-        # 👑 策略：优先用 3.0 (First Choice)
-        # 如果 3.0 挂了，再从 2.0/2.5 里随机选一个备胎
-        primary_model = self.models[0] 
-        backup_models = self.models[1:]
-        
-        current_model = primary_model
-        
-        try:
-            if self.debug: st.caption(f"🤖 正在调用: {current_model}...")
-            r = requests.post(self._get_url(current_model), json=payload, timeout=30)
-            
-            # 🔄 故障转移 (Failover)
-            if r.status_code != 200:
-                # 选一个替补
-                backup = random.choice(backup_models)
-                if self.debug: st.warning(f"⚠️ {current_model} 异常 ({r.status_code})，切换至替补 {backup}...")
-                current_model = backup
-                time.sleep(0.5)
-                r = requests.post(self._get_url(current_model), json=payload, timeout=30)
-            
-            if self.debug and r.status_code != 200:
-                st.error(f"❌ Gemini Error ({current_model}): {r.text}")
 
-            if r.status_code != 200: return None
-            
-            raw = r.json()['candidates'][0]['content']['parts'][0]['text']
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            return json.loads(match.group(0)) if match else None
-            
-        except Exception as e:
-            if self.debug: st.error(f"❌ Analyst Crash: {str(e)}")
-            return None
+        # 🎲 真正的随机轮询：打乱顺序
+        shuffled_models = self.models.copy()
+        random.shuffle(shuffled_models)
+        
+        # 🔄 挨个试 (Failover)
+        for model in shuffled_models:
+            result = self._try_request(model, payload)
+            if result:
+                if self.debug: st.toast(f"✅ {model} 成功")
+                return result
+            # 如果失败，循环继续，尝试下一个模型
+            if self.debug: st.caption(f"🛡️ 切换下一个模型...")
+        
+        if self.debug: st.error("❌ 所有模型均全军覆没")
+        return None
 
 # ==========================================
 # 4. 辅助函数
@@ -195,7 +199,7 @@ def render_sidebar():
         st.title(f"{PAGE_ICON} WeRead AI")
         if "WX_KEY" in st.secrets:
             wx_key = st.secrets["WX_KEY"]; st.success("✅ WxRank Key 已云端加载")
-        else: wx_key = st.text_input("WxRank API Key", type="password")
+        else: wx_key = st.text_input("WxRank API Key", value="5e1bde783213147e8907")
 
         if "GEMINI_KEY" in st.secrets:
             gemini_key = st.secrets["GEMINI_KEY"]; st.success("✅ Gemini Key 已云端加载")
@@ -207,10 +211,10 @@ def render_sidebar():
         force = c2.toggle("⚡ 强刷", False)
         
         if debug and gemini_key:
-            if st.button("🧪 测试 Gemini (3.0)", width="stretch"):
+            if st.button("🧪 测试 Gemini", width="stretch"):
                 ana = AIAnalyst(gemini_key, debug=True)
                 code, msg = ana.test_connection()
-                if code == 200: st.toast("✅ Gemini 3.0 连接通畅！", icon="🚀")
+                if code == 200: st.toast("✅ Gemini 连接通畅！", icon="🚀")
                 else: st.error(f"连接失败 ({code}): {msg}")
 
         time_scope = st.selectbox("📅 范围", [0, 1], format_func=lambda x: "仅今日" if x == 0 else "近48小时")
@@ -273,9 +277,14 @@ def render_results():
                     else: return 'background-color: #f8d7da; color: #721c24'
                 except: return ''
 
+            # 🛠️ 修复原文链接显示
             st.dataframe(
                 df.sort_values(["日期", "时间"], ascending=False).style.map(style_score, subset=['价值']),
-                column_config={"原文": st.column_config.LinkColumn("🔗"), "价值": st.column_config.NumberColumn("分")},
+                column_config={
+                    "原文": st.column_config.LinkColumn("🔗", display_text="阅读"), # 修复链接显示
+                    "价值": st.column_config.NumberColumn("分"),
+                    "点评": st.column_config.TextColumn("点评", width="medium") # 确保点评列显示
+                },
                 hide_index=True, width="stretch", height=600
             )
             b = io.BytesIO()
@@ -304,7 +313,8 @@ def render_results():
                     c_head.markdown(f"**{row['标题']}**")
                     c_score.markdown(f":{color}[**{score}分**]")
                     st.caption(f"💡 {row['摘要']}")
-                    if row['点评'] and len(str(row['点评'])) > 1:
+                    # 确保点评显示
+                    if row['点评'] and str(row['点评']).lower() != "none" and len(str(row['点评'])) > 1:
                         st.markdown(f"<small style='color:gray'>💬 {row['点评']}</small>", unsafe_allow_html=True)
                     c_meta, c_btn = st.columns([2, 1.2])
                     with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
@@ -316,56 +326,46 @@ def render_results():
     else:
         st.info("👋 暂无记录，请点击侧边栏「🚀 开始」")
 
-# ==========================================
-# 6. 主程序
-# ==========================================
 def main():
     st.set_page_config(PAGE_TITLE, PAGE_ICON, layout="wide")
     init_state()
     wx, gem, scope, run, dbg, frc = render_sidebar()
-    
     c_t1, c_t2 = st.columns([3, 1])
     c_t1.title(f"{PAGE_ICON} {PAGE_TITLE}")
-    if not st.session_state.history_df.empty:
-        c_t2.metric("已读", len(st.session_state.history_df))
-
+    if not st.session_state.history_df.empty: c_t2.metric("已读", len(st.session_state.history_df))
     if run:
         if not gem: st.error("❌ 缺Key")
         else:
             if dbg: st.warning("🐞 调试模式已开启：正在输出详细 API 日志...")
             src, ana = WxSource(wx, dbg), AIAnalyst(gem, dbg)
             targets = st.session_state.config_list[st.session_state.config_list["启用"]==True]
-            
             if targets.empty: st.warning("未选账号")
             else:
                 bar, new_data = st.progress(0), []
                 today = datetime.now().strftime('%Y-%m-%d')
-                
                 for i, r in enumerate(targets.itertuples()):
-                    if not frc and not st.session_state.history_df[
-                        (st.session_state.history_df['公众号']==r.公众号) & 
-                        (st.session_state.history_df['日期'].astype(str)==today)
-                    ].empty:
+                    if not frc and not st.session_state.history_df[(st.session_state.history_df['公众号']==r.公众号) & (st.session_state.history_df['日期'].astype(str)==today)].empty:
                         st.toast(f"⏭️ 跳过 {r.公众号}"); bar.progress((i+1)/len(targets)); continue
-                        
                     st.toast(f"📖 {r.公众号}")
                     for a in src.get_scoped_articles(r.ID, scope):
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
-                                # 3.0 领航分析
+                                # 真正清洗数据的地方
                                 if res := ana.analyze(txt, a['title']):
                                     new_data.append({
-                                        "日期": a['date'], "时间": a['full_time'][11:16], "公众号": r.公众号, 
-                                        "标题": a['title'], "价值": res.get('score', 0), "摘要": res.get('summary', ''), 
-                                        "点评": res.get('suggestion', ''), "原文": a['url']
+                                        **a, 
+                                        "时间": a['full_time'][11:16], 
+                                        "公众号": r.公众号, 
+                                        "价值": int(res.get('score', 0)), # 强制转 int
+                                        "摘要": str(res.get('summary', '')),
+                                        "点评": str(res.get('suggestion', '')), # 强制转 str
+                                        "原文": a['url']
                                     })
                     bar.progress((i+1)/len(targets))
-                
                 if new_data:
                     st.toast("☁️ 同步中..."); df = st.session_state.data_manager.save_data(pd.DataFrame(new_data))
                     st.session_state.history_df = df; st.success(f"更新 {len(new_data)} 篇"); time.sleep(1); st.rerun()
                 else: st.toast("✅ 无更新")
-
     render_results()
 
 if __name__ == "__main__":
