@@ -17,6 +17,7 @@ from streamlit_gsheets import GSheetsConnection
 PAGE_TITLE = "WeRead AI (微读精选)"
 PAGE_ICON = "📖"
 DEFAULT_XML_PATH = "WeChat Official Accounts List.xml"
+# 🔒 核心：锁定 8 列标准结构
 EXPECTED_COLS = ["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"]
 
 SYSTEM_INSTRUCTION = """
@@ -27,13 +28,13 @@ SYSTEM_INSTRUCTION = """
 * 6-7分 (合格)：有基本的数据支撑和逻辑推演。
 * 8-10分 (Alpha)：极其稀缺的行业内幕、深度的宏观推演。
 【输出要求】
-1. 摘要：50字内。
-2. 点评：15字内毒舌点评。
+1. 摘要：80字内。
+2. 点评：20字内毒舌点评。
 3. 必须输出纯 JSON，key 为 "summary", "score", "suggestion"。
 """
 
 # ==========================================
-# 2. 数据层
+# 2. 数据层 (防爆修复版)
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -46,24 +47,33 @@ class DataManager:
         if not self.enabled: return pd.DataFrame(columns=EXPECTED_COLS)
         try:
             df = self.conn.read(ttl=0)
-            if df.empty: return pd.DataFrame(columns=EXPECTED_COLS)
-            # 补齐列
+            
+            # 🛡️ 核心修复：防止 KeyError
+            # 如果读出来的表是空的，或者列名完全不对劲（比如被之前的错误搞乱了）
+            # 就直接返回一个标准的空表，防止程序崩溃
+            if df.empty or '日期' not in df.columns:
+                return pd.DataFrame(columns=EXPECTED_COLS)
+            
+            # 补齐可能缺失的列
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
+            
+            # 只要标准列
             df = df[EXPECTED_COLS]
             
-            # 🛠️ 强力清洗数据
-            # 1. 分数转整数
+            # 🧹 强力清洗：修复小数点和 None
+            # 1. 分数：转数字 -> 填0 -> 转整数
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
-            # 2. 点评去 None
-            df['点评'] = df['点评'].fillna("").astype(str).replace("None", "")
-            # 3. 其他转字符串
+            # 2. 点评：填空 -> 转字符串 -> 替换文本的"None"
+            df['点评'] = df['点评'].fillna("").astype(str).replace("None", "").replace("nan", "")
+            # 3. 其他列
             df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
-            df['摘要'] = df['摘要'].fillna("").astype(str)
             
             return df
-        except: return pd.DataFrame(columns=EXPECTED_COLS)
+        except Exception as e:
+            # 如果连读都读不了，返回空表保命
+            return pd.DataFrame(columns=EXPECTED_COLS)
 
     def save_data(self, new_df):
         if not self.enabled: return new_df
@@ -79,7 +89,7 @@ class DataManager:
             return new_df
 
 # ==========================================
-# 3. 服务层 (🚀 3模型随机轮询 + 自动切换)
+# 3. 服务层 (🚀 双核轮询 + 自动切换)
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -114,25 +124,22 @@ class AIAnalyst:
     def __init__(self, key, debug=False):
         self.key = key
         self.debug = debug
-        # ✨ 三兄弟齐上阵
-        self.models = ["gemini-3-flash-preview", "gemini-2.0-flash", "gemini-2.5-flash"]
+        # ✨ 黄金搭档：只用 2.0 和 2.5
+        self.models = ["gemini-2.0-flash", "gemini-2.5-flash"]
 
     def _get_url(self, model_name):
         return f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.key}"
 
     def test_connection(self):
         try:
-            model = self.models[1] # 测试 2.0，最稳
-            r = requests.post(self._get_url(model), json={"contents": [{"parts": [{"text": "Hello"}]}]}, timeout=10)
+            r = requests.post(self._get_url(self.models[0]), json={"contents": [{"parts": [{"text": "Hello"}]}]}, timeout=10)
             return r.status_code, r.text
         except Exception as e: return 0, str(e)
 
     def _try_request(self, model, payload):
         try:
-            # ⏱️ 统一 30s 超时
             timeout = 30
-            if self.debug: st.caption(f"🤖 正在调用: {model}...")
-            
+            if self.debug: st.caption(f"🤖 调用: {model}...")
             r = requests.post(self._get_url(model), json=payload, timeout=timeout)
             
             if r.status_code == 200:
@@ -140,7 +147,7 @@ class AIAnalyst:
                 match = re.search(r'\{.*\}', raw, re.DOTALL)
                 return json.loads(match.group(0)) if match else None
             else:
-                if self.debug: st.warning(f"⚠️ {model} 异常 ({r.status_code})")
+                if self.debug: st.warning(f"⚠️ {model} 异常: {r.status_code}")
                 return None
         except Exception as e:
             if self.debug: st.warning(f"⚠️ {model} 失败: {str(e)}")
@@ -153,20 +160,19 @@ class AIAnalyst:
             "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
         }
 
-        # 🎲 真正的随机轮询：打乱顺序
+        # 🎲 随机洗牌：实现真正的负载均衡
         shuffled_models = self.models.copy()
         random.shuffle(shuffled_models)
         
-        # 🔄 挨个试 (Failover)
+        # 🔄 轮询重试
         for model in shuffled_models:
             result = self._try_request(model, payload)
             if result:
                 if self.debug: st.toast(f"✅ {model} 成功")
                 return result
-            # 如果失败，循环继续，尝试下一个模型
-            if self.debug: st.caption(f"🛡️ 切换下一个模型...")
+            # 失败则继续下一个
         
-        if self.debug: st.error("❌ 所有模型均全军覆没")
+        if self.debug: st.error("❌ 2.0 和 2.5 均无响应")
         return None
 
 # ==========================================
@@ -186,7 +192,10 @@ def parse_xml(f):
 
 def init_state():
     if 'data_manager' not in st.session_state: st.session_state.data_manager = DataManager()
-    if 'history_df' not in st.session_state: st.session_state.history_df = st.session_state.data_manager.load_data()
+    # 强制重新加载一次数据，触发 DataManager 里的防爆逻辑
+    if 'history_df' not in st.session_state: 
+        st.session_state.history_df = st.session_state.data_manager.load_data()
+    
     if 'config_list' not in st.session_state:
         df = parse_xml(DEFAULT_XML_PATH) if os.path.exists(DEFAULT_XML_PATH) else None
         st.session_state.config_list = df if df is not None else pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴 (演示)", "启用": True}])
@@ -211,7 +220,7 @@ def render_sidebar():
         force = c2.toggle("⚡ 强刷", False)
         
         if debug and gemini_key:
-            if st.button("🧪 测试 Gemini", width="stretch"):
+            if st.button("🧪 测试连通性", width="stretch"):
                 ana = AIAnalyst(gemini_key, debug=True)
                 code, msg = ana.test_connection()
                 if code == 200: st.toast("✅ Gemini 连接通畅！", icon="🚀")
@@ -248,8 +257,10 @@ def render_sidebar():
         st.divider()
         c1, c2 = st.columns(2)
         trigger = c1.button("🚀 开始", type="primary", width="stretch") 
-        if c2.button("🗑️ 清空", width="stretch"):
-            st.session_state.history_df = st.session_state.history_df.iloc[0:0]
+        if c2.button("🗑️ 清空历史", width="stretch"):
+            # 🧹 清空功能优化：直接重置为空表
+            st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
+            st.session_state.data_manager.save_data(st.session_state.history_df)
             st.rerun()
             
         return wx_key, gemini_key, time_scope, trigger, debug, force
@@ -268,6 +279,7 @@ def render_results():
         df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
         
         if show_table:
+            # 🎨 表格颜色逻辑 (4色)
             def style_score(v):
                 try:
                     v = int(v)
@@ -277,13 +289,13 @@ def render_results():
                     else: return 'background-color: #f8d7da; color: #721c24'
                 except: return ''
 
-            # 🛠️ 修复原文链接显示
             st.dataframe(
                 df.sort_values(["日期", "时间"], ascending=False).style.map(style_score, subset=['价值']),
                 column_config={
-                    "原文": st.column_config.LinkColumn("🔗", display_text="阅读"), # 修复链接显示
-                    "价值": st.column_config.NumberColumn("分"),
-                    "点评": st.column_config.TextColumn("点评", width="medium") # 确保点评列显示
+                    "原文": st.column_config.LinkColumn("🔗", display_text="阅读"), # 修复链接
+                    "价值": st.column_config.NumberColumn("分", format="%d"), # 修复整数显示
+                    "点评": st.column_config.TextColumn("点评", width="medium"),
+                    "摘要": st.column_config.TextColumn("摘要", width="large")
                 },
                 hide_index=True, width="stretch", height=600
             )
@@ -313,9 +325,11 @@ def render_results():
                     c_head.markdown(f"**{row['标题']}**")
                     c_score.markdown(f":{color}[**{score}分**]")
                     st.caption(f"💡 {row['摘要']}")
-                    # 确保点评显示
-                    if row['点评'] and str(row['点评']).lower() != "none" and len(str(row['点评'])) > 1:
-                        st.markdown(f"<small style='color:gray'>💬 {row['点评']}</small>", unsafe_allow_html=True)
+                    # 确保点评显示，且不显示 None
+                    comment = str(row['点评'])
+                    if comment and comment.lower() != "none" and len(comment) > 1:
+                        st.markdown(f"<small style='color:gray'>💬 {comment}</small>", unsafe_allow_html=True)
+                    
                     c_meta, c_btn = st.columns([2, 1.2])
                     with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
                     with c_btn:
@@ -350,15 +364,17 @@ def main():
                     for a in src.get_scoped_articles(r.ID, scope):
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
-                                # 真正清洗数据的地方
                                 if res := ana.analyze(txt, a['title']):
+                                    # 再次清洗，确保写入数据干净
+                                    score = int(res.get('score', 0))
+                                    comment = str(res.get('suggestion', '')).replace("None", "")
                                     new_data.append({
                                         **a, 
                                         "时间": a['full_time'][11:16], 
                                         "公众号": r.公众号, 
-                                        "价值": int(res.get('score', 0)), # 强制转 int
-                                        "摘要": str(res.get('summary', '')),
-                                        "点评": str(res.get('suggestion', '')), # 强制转 str
+                                        "价值": score, 
+                                        "摘要": str(res.get('summary', '')), 
+                                        "点评": comment, 
                                         "原文": a['url']
                                     })
                     bar.progress((i+1)/len(targets))
