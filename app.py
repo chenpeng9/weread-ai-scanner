@@ -33,7 +33,7 @@ SYSTEM_INSTRUCTION = """
 """
 
 # ==========================================
-# 2. 数据层 (防爆 + 暴力清空)
+# 2. 数据层 (带防撞梁的稳定版)
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -47,27 +47,23 @@ class DataManager:
         try:
             df = self.conn.read(ttl=0)
             
-            # 🛡️ 核心修复：防止 KeyError
-            # 如果表是空的，或者关键列丢失，说明表坏了
+            # 🛡️ 防撞梁：如果读出来的数据缺胳膊少腿，直接扔掉，返回空表
+            # 这能100%防止 KeyError
             if df.empty or '日期' not in df.columns:
                 return pd.DataFrame(columns=EXPECTED_COLS)
             
-            # 补齐可能缺失的列
+            # 补齐列
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
-            
-            # 只要标准列
             df = df[EXPECTED_COLS]
             
-            # 🧹 强力清洗
+            # 基础清洗
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
-            df['点评'] = df['点评'].fillna("").astype(str).replace("None", "").replace("nan", "")
             df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
-            
+            df['点评'] = df['点评'].fillna("").astype(str)
             return df
-        except Exception as e:
-            return pd.DataFrame(columns=EXPECTED_COLS)
+        except: return pd.DataFrame(columns=EXPECTED_COLS)
 
     def save_data(self, new_df):
         if not self.enabled: return new_df
@@ -82,19 +78,8 @@ class DataManager:
             st.error(f"保存失败: {e}")
             return new_df
 
-    def reset_data(self):
-        """🚀 核按钮：暴力覆盖模式（清空云端）"""
-        if not self.enabled: return pd.DataFrame(columns=EXPECTED_COLS)
-        try:
-            empty_df = pd.DataFrame(columns=EXPECTED_COLS)
-            self.conn.update(data=empty_df)
-            return empty_df
-        except Exception as e:
-            st.error(f"清空失败: {e}")
-            return pd.DataFrame(columns=EXPECTED_COLS)
-
 # ==========================================
-# 3. 服务层
+# 3. 服务层 (🚀 双核负载均衡)
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -129,6 +114,7 @@ class AIAnalyst:
     def __init__(self, key, debug=False):
         self.key = key
         self.debug = debug
+        # ✅ 2.0 和 2.5 负载均衡
         self.models = ["gemini-2.0-flash", "gemini-2.5-flash"]
 
     def _get_url(self, model_name):
@@ -142,9 +128,8 @@ class AIAnalyst:
 
     def _try_request(self, model, payload):
         try:
-            timeout = 30
-            if self.debug: st.caption(f"🤖 调用: {model}...")
-            r = requests.post(self._get_url(model), json=payload, timeout=timeout)
+            if self.debug: st.caption(f"🤖 调用模型: {model}...")
+            r = requests.post(self._get_url(model), json=payload, timeout=30)
             
             if r.status_code == 200:
                 raw = r.json()['candidates'][0]['content']['parts'][0]['text']
@@ -158,21 +143,22 @@ class AIAnalyst:
             return None
 
     def analyze(self, text, title):
-        time.sleep(0.3)
+        time.sleep(0.5)
         payload = {
             "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
             "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
         }
+
         shuffled_models = self.models.copy()
         random.shuffle(shuffled_models)
         
         for model in shuffled_models:
             result = self._try_request(model, payload)
             if result:
-                if self.debug: st.toast(f"✅ {model} 成功")
+                if self.debug: st.toast(f"✅ {model} 分析成功")
                 return result
         
-        if self.debug: st.error("❌ 2.0 和 2.5 均无响应")
+        if self.debug: st.error("❌ 所有模型均无法响应")
         return None
 
 # ==========================================
@@ -190,19 +176,15 @@ def parse_xml(f):
         ])
     except: return None
 
-# 🛠️ 核心修复：init_state 增加强校验
 def init_state():
     if 'data_manager' not in st.session_state: st.session_state.data_manager = DataManager()
-    
-    # 强制重新加载
     if 'history_df' not in st.session_state: 
         st.session_state.history_df = st.session_state.data_manager.load_data()
     
-    # 🚨 熔断机制：如果内存里的表是坏的（没有日期列），立刻重置为空表
-    # 这能防止 render_results 因为找不到列而崩溃
+    # 🛡️ 二次校验：如果 session 里的数据是坏的，立刻重置
     if '日期' not in st.session_state.history_df.columns:
         st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
-    
+
     if 'config_list' not in st.session_state:
         df = parse_xml(DEFAULT_XML_PATH) if os.path.exists(DEFAULT_XML_PATH) else None
         st.session_state.config_list = df if df is not None else pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴 (演示)", "启用": True}])
@@ -264,22 +246,17 @@ def render_sidebar():
         st.divider()
         c1, c2 = st.columns(2)
         trigger = c1.button("🚀 开始", type="primary", width="stretch") 
-        if c2.button("🗑️ 清空历史", width="stretch"):
-            # 调用新逻辑
-            st.session_state.history_df = st.session_state.data_manager.reset_data()
+        if c2.button("🗑️ 清空本次缓存", width="stretch"):
+            # 仅清空当前 Session，最安全的急救措施
+            st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
             st.rerun()
             
         return wx_key, gemini_key, time_scope, trigger, debug, force
 
 def render_results():
-    # 🛑 防御性检查：如果是空表，直接跳过渲染
-    if st.session_state.history_df.empty:
-        st.info("👋 暂无记录，请点击侧边栏「🚀 开始」")
-        return
-
-    # 🛑 核心防御：如果表里没有日期列（坏数据），显示修复提示，而不是报错崩溃
-    if '日期' not in st.session_state.history_df.columns:
-        st.error("⚠️ 数据结构异常：检测到坏数据。请点击侧边栏的【🗑️ 清空历史】按钮来重置数据库。")
+    # 🛡️ 终极防御：如果表是坏的，直接显示空，不让它报错
+    if st.session_state.history_df.empty or '日期' not in st.session_state.history_df.columns:
+        st.info("👋 暂无记录（或缓存已重置），请点击侧边栏「🚀 开始」")
         return
 
     col1, col2 = st.columns([1.5, 1])
@@ -306,7 +283,7 @@ def render_results():
         st.dataframe(
             df.sort_values(["日期", "时间"], ascending=False).style.map(style_score, subset=['价值']),
             column_config={
-                "原文": st.column_config.LinkColumn("🔗", display_text="阅读"),
+                "原文": st.column_config.LinkColumn("🔗", display_text="阅读"), 
                 "价值": st.column_config.NumberColumn("分", format="%d"),
                 "点评": st.column_config.TextColumn("点评", width="medium"),
                 "摘要": st.column_config.TextColumn("摘要", width="large")
@@ -339,9 +316,11 @@ def render_results():
                 c_head.markdown(f"**{row['标题']}**")
                 c_score.markdown(f":{color}[**{score}分**]")
                 st.caption(f"💡 {row['摘要']}")
+                
                 comment = str(row['点评'])
                 if comment and comment.lower() != "none" and len(comment) > 1:
                     st.markdown(f"<small style='color:gray'>💬 {comment}</small>", unsafe_allow_html=True)
+                
                 c_meta, c_btn = st.columns([2, 1.2])
                 with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
                 with c_btn:
@@ -373,7 +352,6 @@ def main():
                         st.toast(f"⏭️ 跳过 {r.公众号}"); bar.progress((i+1)/len(targets)); continue
                     st.toast(f"📖 {r.公众号}")
                     for a in src.get_scoped_articles(r.ID, scope):
-                        # 检查重复也加防御
                         if '原文' in st.session_state.history_df.columns and not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
                                 if res := ana.analyze(txt, a['title']):
