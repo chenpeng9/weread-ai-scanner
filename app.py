@@ -27,8 +27,8 @@ SYSTEM_INSTRUCTION = """
 * 6-7分 (合格)：有基本的数据支撑和逻辑推演。
 * 8-10分 (Alpha)：极其稀缺的行业内幕、深度的宏观推演。
 【输出要求】
-1. 摘要：50字内。
-2. 点评：15字内毒舌点评。
+1. 摘要：80字内。
+2. 点评：20字内毒舌点评。
 3. 必须输出纯 JSON，key 为 "summary", "score", "suggestion"。
 """
 
@@ -197,7 +197,7 @@ def render_sidebar():
         st.title(f"{PAGE_ICON} WeRead AI")
         if "WX_KEY" in st.secrets:
             wx_key = st.secrets["WX_KEY"]; st.success("✅ WxRank Key 已云端加载")
-        else: wx_key = st.text_input("WxRank API Key", value="5e1bde783213147e8907")
+        else: wx_key = st.text_input("WxRank API Key", type="password")
 
         if "GEMINI_KEY" in st.secrets:
             gemini_key = st.secrets["GEMINI_KEY"]; st.success("✅ Gemini Key 已云端加载")
