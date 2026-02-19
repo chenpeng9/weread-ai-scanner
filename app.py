@@ -29,12 +29,12 @@ SYSTEM_INSTRUCTION = """
 * 8-10分 (Alpha)：极其稀缺的行业内幕、深度的宏观推演。
 【输出要求】
 1. 摘要：80字内。
-2. 点评：20字内毒舌点评。
+2. 点评：25字内毒舌点评。
 3. 必须输出纯 JSON，key 为 "summary", "score", "suggestion"。
 """
 
 # ==========================================
-# 2. 数据层 (防爆修复版)
+# 2. 数据层 (防爆 + 暴力清空)
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -49,8 +49,8 @@ class DataManager:
             df = self.conn.read(ttl=0)
             
             # 🛡️ 核心修复：防止 KeyError
-            # 如果读出来的表是空的，或者列名完全不对劲（比如被之前的错误搞乱了）
-            # 就直接返回一个标准的空表，防止程序崩溃
+            # 如果表是空的，或者关键列丢失，说明表坏了
+            # 直接返回一个新的空表，防止程序崩溃
             if df.empty or '日期' not in df.columns:
                 return pd.DataFrame(columns=EXPECTED_COLS)
             
@@ -61,7 +61,7 @@ class DataManager:
             # 只要标准列
             df = df[EXPECTED_COLS]
             
-            # 🧹 强力清洗：修复小数点和 None
+            # 🧹 强力清洗
             # 1. 分数：转数字 -> 填0 -> 转整数
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
             # 2. 点评：填空 -> 转字符串 -> 替换文本的"None"
@@ -76,6 +76,7 @@ class DataManager:
             return pd.DataFrame(columns=EXPECTED_COLS)
 
     def save_data(self, new_df):
+        """追加模式：读取旧数据 + 新数据"""
         if not self.enabled: return new_df
         try:
             new_df = new_df[EXPECTED_COLS]
@@ -88,8 +89,21 @@ class DataManager:
             st.error(f"保存失败: {e}")
             return new_df
 
+    def reset_data(self):
+        """🚀 核按钮：暴力覆盖模式（清空云端）"""
+        if not self.enabled: return pd.DataFrame(columns=EXPECTED_COLS)
+        try:
+            # 创建一个只有表头的空表
+            empty_df = pd.DataFrame(columns=EXPECTED_COLS)
+            # 直接 Update，不读取旧数据，实现物理覆盖
+            self.conn.update(data=empty_df)
+            return empty_df
+        except Exception as e:
+            st.error(f"清空失败: {e}")
+            return pd.DataFrame(columns=EXPECTED_COLS)
+
 # ==========================================
-# 3. 服务层 (🚀 双核轮询 + 自动切换)
+# 3. 服务层 (2.0/2.5 双核轮询)
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -132,6 +146,7 @@ class AIAnalyst:
 
     def test_connection(self):
         try:
+            # 测试连接时用 2.0，最稳
             r = requests.post(self._get_url(self.models[0]), json={"contents": [{"parts": [{"text": "Hello"}]}]}, timeout=10)
             return r.status_code, r.text
         except Exception as e: return 0, str(e)
@@ -192,6 +207,7 @@ def parse_xml(f):
 
 def init_state():
     if 'data_manager' not in st.session_state: st.session_state.data_manager = DataManager()
+    
     # 强制重新加载一次数据，触发 DataManager 里的防爆逻辑
     if 'history_df' not in st.session_state: 
         st.session_state.history_df = st.session_state.data_manager.load_data()
@@ -257,10 +273,10 @@ def render_sidebar():
         st.divider()
         c1, c2 = st.columns(2)
         trigger = c1.button("🚀 开始", type="primary", width="stretch") 
+        # 🟢 修复点：调用新的 reset_data 方法
         if c2.button("🗑️ 清空历史", width="stretch"):
-            # 🧹 清空功能优化：直接重置为空表
-            st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
-            st.session_state.data_manager.save_data(st.session_state.history_df)
+            # 这里的逻辑是：调用核按钮 -> 重置 session -> 刷新
+            st.session_state.history_df = st.session_state.data_manager.reset_data()
             st.rerun()
             
         return wx_key, gemini_key, time_scope, trigger, debug, force
@@ -329,7 +345,6 @@ def render_results():
                     comment = str(row['点评'])
                     if comment and comment.lower() != "none" and len(comment) > 1:
                         st.markdown(f"<small style='color:gray'>💬 {comment}</small>", unsafe_allow_html=True)
-                    
                     c_meta, c_btn = st.columns([2, 1.2])
                     with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
                     with c_btn:
@@ -365,7 +380,6 @@ def main():
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
                                 if res := ana.analyze(txt, a['title']):
-                                    # 再次清洗，确保写入数据干净
                                     score = int(res.get('score', 0))
                                     comment = str(res.get('suggestion', '')).replace("None", "")
                                     new_data.append({
