@@ -4,6 +4,7 @@ import json
 import time
 import re
 import pandas as pd
+import random
 import xml.etree.ElementTree as ET
 import io
 import os
@@ -70,7 +71,7 @@ class DataManager:
             return new_df
 
 # ==========================================
-# 3. 服务层
+# 3. 服务层 (🚀 3.0/2.0/2.5 三引擎版)
 # ==========================================
 class WxSource:
     def __init__(self, api_key, debug=False):
@@ -98,43 +99,68 @@ class WxSource:
     def fetch_content(self, url):
         try:
             r = requests.post(self.content_api, json={"key": self.key, "url": url}, timeout=20).json()
-            return r.get("data", {}).get("text", "")[:5000] if str(r.get("code")) == "0" else ""
+            # 3.0 能力更强，可以处理更多上下文，这里放宽到 7000 字
+            return r.get("data", {}).get("text", "")[:7000] if str(r.get("code")) == "0" else ""
         except: return ""
 
 class AIAnalyst:
     def __init__(self, key, debug=False):
-        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
-        self.debug = debug
         self.key = key
+        self.debug = debug
+        # ✨ 梦幻阵容：3.0 领衔，2.0/2.5 替补
+        self.models = ["gemini-3-flash-preview", "gemini-2.0-flash", "gemini-2.5-flash"]
+
+    def _get_url(self, model_name):
+        return f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.key}"
 
     def test_connection(self):
         try:
+            # 优先测试 3.0
+            model = self.models[0]
+            url = self._get_url(model)
             payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
-            r = requests.post(self.url, json=payload, timeout=10)
+            r = requests.post(url, json=payload, timeout=10)
             return r.status_code, r.text
         except Exception as e: return 0, str(e)
 
     def analyze(self, text, title):
-        time.sleep(4) 
+        # 极速响应
+        time.sleep(0.3) 
+        
         payload = {
             "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
             "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
         }
+        
+        # 👑 策略：优先用 3.0 (First Choice)
+        # 如果 3.0 挂了，再从 2.0/2.5 里随机选一个备胎
+        primary_model = self.models[0] 
+        backup_models = self.models[1:]
+        
+        current_model = primary_model
+        
         try:
-            r = requests.post(self.url, json=payload, timeout=30)
-            if r.status_code == 429:
-                if self.debug: st.warning("⚠️ 限流冷却中 (12s)...")
-                time.sleep(12)
-                r = requests.post(self.url, json=payload, timeout=30)
+            if self.debug: st.caption(f"🤖 正在调用: {current_model}...")
+            r = requests.post(self._get_url(current_model), json=payload, timeout=30)
+            
+            # 🔄 故障转移 (Failover)
+            if r.status_code != 200:
+                # 选一个替补
+                backup = random.choice(backup_models)
+                if self.debug: st.warning(f"⚠️ {current_model} 异常 ({r.status_code})，切换至替补 {backup}...")
+                current_model = backup
+                time.sleep(0.5)
+                r = requests.post(self._get_url(current_model), json=payload, timeout=30)
             
             if self.debug and r.status_code != 200:
-                st.error(f"❌ Gemini Error ({r.status_code}): {r.text}")
+                st.error(f"❌ Gemini Error ({current_model}): {r.text}")
 
             if r.status_code != 200: return None
             
             raw = r.json()['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             return json.loads(match.group(0)) if match else None
+            
         except Exception as e:
             if self.debug: st.error(f"❌ Analyst Crash: {str(e)}")
             return None
@@ -181,10 +207,10 @@ def render_sidebar():
         force = c2.toggle("⚡ 强刷", False)
         
         if debug and gemini_key:
-            if st.button("🧪 测试 Gemini", width="stretch"):
+            if st.button("🧪 测试 Gemini (3.0)", width="stretch"):
                 ana = AIAnalyst(gemini_key, debug=True)
                 code, msg = ana.test_connection()
-                if code == 200: st.toast("✅ 连接成功！", icon="🎉")
+                if code == 200: st.toast("✅ Gemini 3.0 连接通畅！", icon="🚀")
                 else: st.error(f"连接失败 ({code}): {msg}")
 
         time_scope = st.selectbox("📅 范围", [0, 1], format_func=lambda x: "仅今日" if x == 0 else "近48小时")
@@ -238,14 +264,13 @@ def render_results():
         df = st.session_state.history_df if sel_date == "全部" else st.session_state.history_df[st.session_state.history_df['日期'].astype(str) == sel_date]
         
         if show_table:
-            # --- 表格模式 (修复 4 档颜色) ---
             def style_score(v):
                 try:
                     v = int(v)
-                    if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold' # 绿 (Alpha)
-                    elif v >= 6: return 'background-color: #cce5ff; color: #004085' # 蓝 (合格)
-                    elif v >= 3: return 'background-color: #fff3cd; color: #856404' # 黄 (平庸)
-                    else: return 'background-color: #f8d7da; color: #721c24' # 红 (垃圾)
+                    if v >= 8: return 'background-color: #d4edda; color: #155724; font-weight: bold'
+                    elif v >= 6: return 'background-color: #cce5ff; color: #004085'
+                    elif v >= 3: return 'background-color: #fff3cd; color: #856404'
+                    else: return 'background-color: #f8d7da; color: #721c24'
                 except: return ''
 
             st.dataframe(
@@ -258,7 +283,6 @@ def render_results():
             st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
 
         else:
-            # --- 卡片模式 ---
             sort_mode = st.radio("排序", ["⏱️ 时间倒序", "🔥 评分最高"], horizontal=True, label_visibility="collapsed")
             if sort_mode == "🔥 评分最高":
                 df_sorted = df.sort_values(by=["价值", "日期", "时间"], ascending=[False, False, False])
@@ -270,7 +294,6 @@ def render_results():
             for _, row in df_sorted.iterrows():
                 try: score = int(row['价值'])
                 except: score = 0
-                # 卡片模式的 4 档颜色
                 if score >= 8: color, icon = "green", "🟢"
                 elif score >= 6: color, icon = "blue", "🔵"
                 elif score >= 3: color, icon = "orange", "🟡"
@@ -329,6 +352,7 @@ def main():
                     for a in src.get_scoped_articles(r.ID, scope):
                         if not (st.session_state.history_df['原文']==a['url']).any():
                             if txt := src.fetch_content(a['url']):
+                                # 3.0 领航分析
                                 if res := ana.analyze(txt, a['title']):
                                     new_data.append({
                                         "日期": a['date'], "时间": a['full_time'][11:16], "公众号": r.公众号, 
