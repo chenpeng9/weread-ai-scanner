@@ -16,8 +16,13 @@ from streamlit_gsheets import GSheetsConnection
 # ==========================================
 PAGE_TITLE = "WeRead AI (微读精选)"
 PAGE_ICON = "📖"
-DEFAULT_XML_PATH = "WeChat Official Accounts List.xml"
+
+# 🔒 必须严格对应 Google Sheets 的 Sheet 名称
+SHEET_HISTORY = "History"
+SHEET_ACCOUNTS = "Accounts"
+
 EXPECTED_COLS = ["日期", "时间", "公众号", "标题", "价值", "摘要", "点评", "原文"]
+ACCOUNT_COLS = ["ID", "公众号", "启用"]
 
 SYSTEM_INSTRUCTION = """
 【角色】你是一位像“浑水调研”一样毒辣、冷血的顶级做空机构分析师。你对市场噪音极度不耐烦，对“割韭菜”的行为深恶痛绝。
@@ -28,12 +33,12 @@ SYSTEM_INSTRUCTION = """
 * 8-10分 (Alpha)：极其稀缺的行业内幕、深度的宏观推演。
 【输出要求】
 1. 摘要：80字内。
-2. 点评：30字内毒舌点评。
+2. 点评：25字内毒舌点评。
 3. 必须输出纯 JSON，key 为 "summary", "score", "suggestion"。
 """
 
 # ==========================================
-# 2. 数据层
+# 2. 数据层 (指名道姓版)
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -42,50 +47,85 @@ class DataManager:
             self.enabled = True
         except: self.enabled = False
             
-    def load_data(self):
+    # --- 历史记录 (读 History 表) ---
+    def load_history(self):
         if not self.enabled: return pd.DataFrame(columns=EXPECTED_COLS)
         try:
-            df = self.conn.read(ttl=0)
+            # 🟢 显式指定 worksheet="History"
+            df = self.conn.read(worksheet=SHEET_HISTORY, ttl=0)
             if df.empty or '日期' not in df.columns:
                 return pd.DataFrame(columns=EXPECTED_COLS)
+            
             for col in EXPECTED_COLS:
                 if col not in df.columns: df[col] = ""
             df = df[EXPECTED_COLS]
+            
             df['价值'] = pd.to_numeric(df['价值'], errors='coerce').fillna(0).astype(int)
             df['点评'] = df['点评'].fillna("").astype(str).replace("None", "").replace("nan", "")
             df['原文'] = df['原文'].fillna("").astype(str)
             df['日期'] = df['日期'].astype(str)
             df['标题'] = df['标题'].fillna("").astype(str)
             return df
-        except: return pd.DataFrame(columns=EXPECTED_COLS)
+        except Exception as e:
+            # 如果找不到 History 表，不用 panic，返回空即可
+            return pd.DataFrame(columns=EXPECTED_COLS)
 
-    def save_data(self, new_df):
+    def save_history(self, new_df):
         if not self.enabled: return new_df
         try:
             new_df = new_df[EXPECTED_COLS]
-            old = self.load_data()
+            old = self.load_history()
             
-            # 🛡️ 铁三角去重 (公众号+标题+日期)
-            # 优先保留旧数据(old在前)，防止覆盖人工修改
+            # 铁三角去重
             combined = pd.concat([old, new_df], ignore_index=True).drop_duplicates(
                 subset=['公众号', '标题', '日期'], keep='first'
             )
             combined = combined.sort_values(by=["日期", "时间"], ascending=False)
-            self.conn.update(data=combined)
+            
+            # 🟢 写入 History 表
+            self.conn.update(worksheet=SHEET_HISTORY, data=combined)
             return combined
         except Exception as e:
-            st.error(f"保存失败: {e}")
+            st.error(f"历史保存失败: {e}")
             return new_df
 
-    def reset_data(self):
+    def reset_history(self):
         if not self.enabled: return pd.DataFrame(columns=EXPECTED_COLS)
         try:
-            empty_df = pd.DataFrame(columns=EXPECTED_COLS)
-            self.conn.update(data=empty_df)
-            return empty_df
+            empty = pd.DataFrame(columns=EXPECTED_COLS)
+            self.conn.update(worksheet=SHEET_HISTORY, data=empty)
+            return empty
+        except: return pd.DataFrame(columns=EXPECTED_COLS)
+
+    # --- 账号管理 (读 Accounts 表) ---
+    def load_accounts(self):
+        if not self.enabled: return pd.DataFrame(columns=ACCOUNT_COLS)
+        try:
+            # 🟢 显式指定 worksheet="Accounts"
+            df = self.conn.read(worksheet=SHEET_ACCOUNTS, ttl=0)
+            if df.empty: return pd.DataFrame(columns=ACCOUNT_COLS)
+            
+            for col in ACCOUNT_COLS:
+                if col not in df.columns: df[col] = ""
+            df = df[ACCOUNT_COLS]
+            
+            df['ID'] = df['ID'].astype(str)
+            df['公众号'] = df['公众号'].astype(str)
+            # 兼容布尔值转换
+            df['启用'] = df['启用'].astype(str).map({'True': True, 'TRUE': True, '1': True, 'False': False, 'FALSE': False, '0': False}).fillna(True)
+            return df
         except Exception as e:
-            st.error(f"清空失败: {e}")
-            return pd.DataFrame(columns=EXPECTED_COLS)
+            # 找不到 Accounts 表时返回空，界面会提示初始化
+            return pd.DataFrame(columns=ACCOUNT_COLS)
+
+    def save_accounts(self, df):
+        if not self.enabled: return
+        try:
+            df = df[ACCOUNT_COLS]
+            self.conn.update(worksheet=SHEET_ACCOUNTS, data=df)
+            st.toast("✅ 账号配置已同步")
+        except Exception as e:
+            st.error(f"账号保存失败: {e}")
 
 # ==========================================
 # 3. 服务层
@@ -109,9 +149,7 @@ class WxSource:
                         for i in (r.get("data", {}).get("list", []) or r.get("data", [])) 
                         if any((i.get("pub_time") or "").startswith(d) for d in dates)]
             return []
-        except Exception as e:
-            if self.debug: st.error(f"❌ WxSource: {str(e)}")
-            return []
+        except: return []
 
     def fetch_content(self, url):
         try:
@@ -136,34 +174,20 @@ class AIAnalyst:
 
     def _try_request(self, model, payload):
         try:
-            if self.debug: st.caption(f"🤖 调用模型: {model}...")
             r = requests.post(self._get_url(model), json=payload, timeout=30)
-            
             if r.status_code == 200:
                 raw = r.json()['candidates'][0]['content']['parts'][0]['text']
                 match = re.search(r'\{.*\}', raw, re.DOTALL)
                 return json.loads(match.group(0)) if match else None
-            else:
-                if self.debug: st.warning(f"⚠️ {model} 异常: {r.status_code}")
-                return None
-        except Exception as e:
-            if self.debug: st.warning(f"⚠️ {model} 失败: {str(e)}")
             return None
+        except: return None
 
     def analyze(self, text, title):
         time.sleep(0.5)
-        payload = {
-            "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, 
-            "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]
-        }
-        shuffled_models = self.models.copy()
-        random.shuffle(shuffled_models)
-        for model in shuffled_models:
-            result = self._try_request(model, payload)
-            if result:
-                if self.debug: st.toast(f"✅ {model} 分析成功")
-                return result
-        if self.debug: st.error("❌ 所有模型均无法响应")
+        payload = {"system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]}, "contents": [{"parts": [{"text": f"分析《{title}》:\n{text}"}]}]}
+        shuffled = self.models.copy(); random.shuffle(shuffled)
+        for model in shuffled:
+            if res := self._try_request(model, payload): return res
         return None
 
 # ==========================================
@@ -183,12 +207,17 @@ def parse_xml(f):
 
 def init_state():
     if 'data_manager' not in st.session_state: st.session_state.data_manager = DataManager()
-    if 'history_df' not in st.session_state: st.session_state.history_df = st.session_state.data_manager.load_data()
+    
+    # 强制刷新
+    if 'history_df' not in st.session_state: 
+        st.session_state.history_df = st.session_state.data_manager.load_history()
+    # 防撞
     if '日期' not in st.session_state.history_df.columns:
          st.session_state.history_df = pd.DataFrame(columns=EXPECTED_COLS)
-    if 'config_list' not in st.session_state:
-        df = parse_xml(DEFAULT_XML_PATH) if os.path.exists(DEFAULT_XML_PATH) else None
-        st.session_state.config_list = df if df is not None else pd.DataFrame([{"ID": "bullpiano", "公众号": "牛弹琴 (演示)", "启用": True}])
+
+    # 加载账号
+    if 'config_df' not in st.session_state:
+        st.session_state.config_df = st.session_state.data_manager.load_accounts()
 
 # ==========================================
 # 5. 界面渲染
@@ -196,12 +225,9 @@ def init_state():
 def render_sidebar():
     with st.sidebar:
         st.title(f"{PAGE_ICON} WeRead AI")
-        if "WX_KEY" in st.secrets:
-            wx_key = st.secrets["WX_KEY"]; st.success("✅ WxRank Key 已云端加载")
-        else: wx_key = st.text_input("WxRank API Key", type="password")
-
-        if "GEMINI_KEY" in st.secrets:
-            gemini_key = st.secrets["GEMINI_KEY"]; st.success("✅ Gemini Key 已云端加载")
+        if "WX_KEY" in st.secrets: wx_key = st.secrets["WX_KEY"]; st.success("✅ WxRank Key 已加载")
+        else: wx_key = st.text_input("WxRank API Key")
+        if "GEMINI_KEY" in st.secrets: gemini_key = st.secrets["GEMINI_KEY"]; st.success("✅ Gemini Key 已加载")
         else: gemini_key = st.text_input("Gemini API Key", type="password")
         
         st.divider()
@@ -209,45 +235,55 @@ def render_sidebar():
         debug = c1.toggle("🐞 Debug", False)
         force = c2.toggle("⚡ 强刷", False)
         
-        if debug and gemini_key:
-            if st.button("🧪 测试连通性", width="stretch"):
-                ana = AIAnalyst(gemini_key, debug=True)
-                code, msg = ana.test_connection()
-                if code == 200: st.toast("✅ Gemini 连接通畅！", icon="🚀")
-                else: st.error(f"连接失败 ({code}): {msg}")
+        if debug and gemini_key and st.button("🧪 测试连接"):
+            ana = AIAnalyst(gemini_key); code, msg = ana.test_connection()
+            if code == 200: st.toast("✅ Gemini 通畅")
+            else: st.error(f"失败: {msg}")
 
         time_scope = st.selectbox("📅 范围", [0, 1], format_func=lambda x: "仅今日" if x == 0 else "近48小时")
         
-        if u := st.file_uploader("📂 导入XML", "xml"):
-            if st.session_state.get("last_xml") != u.name:
-                if (df := parse_xml(u)) is not None:
-                    st.session_state.config_list = df
-                    st.session_state.last_xml = u.name
-                    st.rerun()
-
         st.divider()
-        c1, c2 = st.columns(2)
-        if c1.button("✅ 全选", width="stretch"): st.session_state.config_list["启用"] = True; st.rerun()
-        if c2.button("⬜ 全不选", width="stretch"): st.session_state.config_list["启用"] = False; st.rerun()
+        st.caption("☁️ 云端账号管理")
+        
+        # XML 导入
+        with st.expander("📂 从 XML 导入"):
+            if u := st.file_uploader("上传 XML", "xml"):
+                if st.button("📥 确认导入覆盖"):
+                    if (df_xml := parse_xml(u)) is not None:
+                        st.session_state.data_manager.save_accounts(df_xml)
+                        st.session_state.config_df = df_xml
+                        st.rerun()
 
-        with st.form("acc_form"):
-            df = st.session_state.config_list.copy()
-            if '启用' in df.columns: df = df[['启用', '公众号', 'ID']]
-            df.insert(1, 'No.', range(1, len(df)+1))
-            edited = st.data_editor(
-                df, 
-                column_config={"启用": st.column_config.CheckboxColumn("✅", width="small"), "No.": st.column_config.NumberColumn(width="small"), "公众号": st.column_config.TextColumn(width="medium"), "ID": None},
-                hide_index=True, width="stretch", height=300
+        # 表格编辑器
+        if not st.session_state.config_df.empty:
+            edited_df = st.data_editor(
+                st.session_state.config_df,
+                column_config={
+                    "启用": st.column_config.CheckboxColumn("✅", width="small"),
+                    "公众号": st.column_config.TextColumn("公众号", width="medium"),
+                    "ID": st.column_config.TextColumn("ID", width="medium"),
+                },
+                num_rows="dynamic",
+                use_container_width=True,
+                key="account_editor"
             )
-            if st.form_submit_button("💾 保存", type="primary", width="stretch"):
-                st.session_state.config_list = edited.drop(columns=['No.'])[['ID', '公众号', '启用']]
+            if st.button("💾 保存配置到云端", type="primary", use_container_width=True):
+                st.session_state.config_df = edited_df
+                st.session_state.data_manager.save_accounts(edited_df)
+                st.rerun()
+        else:
+            st.info("⚠️ 请新建 'Accounts' 表或导入数据")
+            if st.button("➕ 初始化空表格"):
+                init_df = pd.DataFrame([{"ID": "demo_id", "公众号": "示例账号", "启用": True}])
+                st.session_state.data_manager.save_accounts(init_df)
+                st.session_state.config_df = init_df
                 st.rerun()
 
         st.divider()
         c1, c2 = st.columns(2)
-        trigger = c1.button("🚀 开始", type="primary", width="stretch") 
-        if c2.button("🗑️ 清空历史", width="stretch"):
-            st.session_state.history_df = st.session_state.data_manager.reset_data()
+        trigger = c1.button("🚀 开始", type="primary", use_container_width=True) 
+        if c2.button("🗑️ 清空历史", use_container_width=True):
+            st.session_state.history_df = st.session_state.data_manager.reset_history()
             st.rerun()
             
         return wx_key, gemini_key, time_scope, trigger, debug, force
@@ -260,8 +296,7 @@ def render_results():
     col1, col2 = st.columns([1.5, 1])
     with col1:
         raw_dates = st.session_state.history_df['日期'].astype(str).dropna().unique().tolist()
-        valid_dates = [d for d in raw_dates if d.lower() != 'nan' and len(d) > 0]
-        all_dates = ["全部"] + sorted(valid_dates, reverse=True)
+        all_dates = ["全部"] + sorted([d for d in raw_dates if len(d)>0], reverse=True)
         sel_date = st.selectbox("📅 日期回溯", all_dates, label_visibility="collapsed")
     with col2:
         show_table = st.toggle("📋 表格", False)
@@ -277,7 +312,6 @@ def render_results():
                 elif v >= 3: return 'background-color: #fff3cd; color: #856404'
                 else: return 'background-color: #f8d7da; color: #721c24'
             except: return ''
-
         st.dataframe(
             df.sort_values(["日期", "时间"], ascending=False).style.map(style_score, subset=['价值']),
             column_config={
@@ -286,21 +320,15 @@ def render_results():
                 "点评": st.column_config.TextColumn("点评", width="medium"),
                 "摘要": st.column_config.TextColumn("摘要", width="large")
             },
-            hide_index=True, width="stretch", height=600
+            hide_index=True, use_container_width=True, height=600
         )
         b = io.BytesIO()
         with pd.ExcelWriter(b, engine='xlsxwriter') as w: df.to_excel(w, index=False)
-        st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", width="stretch")
-
+        st.download_button("📥 导出Excel", b.getvalue(), f"WeRead_{datetime.now():%m%d}.xlsx", use_container_width=True)
     else:
         sort_mode = st.radio("排序", ["⏱️ 时间倒序", "🔥 评分最高"], horizontal=True, label_visibility="collapsed")
-        if sort_mode == "🔥 评分最高":
-            df_sorted = df.sort_values(by=["价值", "日期", "时间"], ascending=[False, False, False])
-        else:
-            df_sorted = df.sort_values(by=["日期", "时间"], ascending=[False, False])
-
+        df_sorted = df.sort_values(by=["价值", "日期", "时间"], ascending=[False, False, False]) if sort_mode == "🔥 评分最高" else df.sort_values(by=["日期", "时间"], ascending=[False, False])
         if df_sorted.empty: st.info("📭 无记录")
-        
         for _, row in df_sorted.iterrows():
             try: score = int(row['价值'])
             except: score = 0
@@ -308,21 +336,17 @@ def render_results():
             elif score >= 6: color, icon = "blue", "🔵"
             elif score >= 3: color, icon = "orange", "🟡"
             else: color, icon = "red", "🔴"
-
             with st.container(border=True):
-                c_head, c_score = st.columns([3.5, 1])
-                c_head.markdown(f"**{row['标题']}**")
-                c_score.markdown(f":{color}[**{score}分**]")
+                c1, c2 = st.columns([3.5, 1])
+                c1.markdown(f"**{row['标题']}**")
+                c2.markdown(f":{color}[**{score}分**]")
                 st.caption(f"💡 {row['摘要']}")
-                comment = str(row['点评'])
-                if comment and comment.lower() != "none" and len(comment) > 1:
-                    st.markdown(f"<small style='color:gray'>💬 {comment}</small>", unsafe_allow_html=True)
-                c_meta, c_btn = st.columns([2, 1.2])
-                with c_meta: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
-                with c_btn:
-                    url = str(row['原文']).strip()
-                    if url.startswith("http"): st.link_button("👉 阅读全文", url, type="primary", width="stretch")
-                    else: st.button("🚫 无链接", disabled=True, width="stretch", key=f"btn_{row.name}")
+                if (c:=str(row['点评'])) and c.lower()!="none" and len(c)>1: st.markdown(f"<small style='color:gray'>💬 {c}</small>", unsafe_allow_html=True)
+                m1, m2 = st.columns([2, 1.2])
+                with m1: st.caption(f"{str(row['时间'])[5:16]} | {row['公众号']}")
+                with m2: 
+                    if str(row['原文']).startswith("http"): st.link_button("👉 阅读全文", str(row['原文']), type="primary", use_container_width=True)
+                    else: st.button("🚫 无链接", disabled=True, use_container_width=True, key=f"btn_{row.name}")
 
 def main():
     st.set_page_config(PAGE_TITLE, PAGE_ICON, layout="wide")
@@ -336,62 +360,42 @@ def main():
     if run:
         if not gem: st.error("❌ 缺Key")
         else:
-            if dbg: st.warning("🐞 调试模式已开启：正在输出详细 API 日志...")
+            if dbg: st.warning("🐞 Debug On...")
             src, ana = WxSource(wx, dbg), AIAnalyst(gem, dbg)
-            targets = st.session_state.config_list[st.session_state.config_list["启用"]==True]
+            targets = st.session_state.config_df
+            if '启用' in targets.columns: targets = targets[targets['启用'] == True]
+            
             if targets.empty: st.warning("未选账号")
             else:
                 bar, new_data = st.progress(0), []
                 today = datetime.now().strftime('%Y-%m-%d')
                 
                 for i, r in enumerate(targets.itertuples()):
-                    # 🛑 核心修复：如果是“仅今日”模式，且数据库里今天已有该公众号数据，直接整号跳过
+                    # 跳过逻辑
                     if not frc and scope == 0 and '日期' in st.session_state.history_df.columns:
-                        has_today_data = not st.session_state.history_df[
-                            (st.session_state.history_df['公众号'] == r.公众号) & 
-                            (st.session_state.history_df['日期'].astype(str) == today)
-                        ].empty
-                        if has_today_data:
-                            st.toast(f"⏭️ 跳过 {r.公众号} (今日已读)"); bar.progress((i+1)/len(targets)); continue
+                        if not st.session_state.history_df[(st.session_state.history_df['公众号'] == r.公众号) & (st.session_state.history_df['日期'].astype(str) == today)].empty:
+                            st.toast(f"⏭️ {r.公众号}"); bar.progress((i+1)/len(targets)); continue
                     
-                    # 如果是48小时模式，或者强制刷新，或者今天没数据，才调 API
                     st.toast(f"📖 {r.公众号}")
                     for a in src.get_scoped_articles(r.ID, scope):
-                        # 再次去重检查 (防止 48小时 模式下的重复)
-                        is_duplicate_db = False
+                        # 铁三角去重
+                        is_dup = False
                         if '标题' in st.session_state.history_df.columns:
-                            check_mask = (
-                                (st.session_state.history_df['标题'] == a['title']) & 
-                                (st.session_state.history_df['公众号'] == r.公众号) & 
-                                (st.session_state.history_df['日期'] == a['date'])
-                            )
-                            if check_mask.any(): is_duplicate_db = True
-
-                        is_duplicate_current = False
+                            if ((st.session_state.history_df['标题']==a['title']) & (st.session_state.history_df['公众号']==r.公众号) & (st.session_state.history_df['日期']==a['date'])).any(): is_dup = True
                         for nd in new_data:
-                             if nd['标题'] == a['title'] and nd['公众号'] == r.公众号 and nd['日期'] == a['date']:
-                                 is_duplicate_current = True
-                                 break
+                             if nd['标题']==a['title'] and nd['公众号']==r.公众号 and nd['日期']==a['date']: is_dup = True; break
                         
-                        if not is_duplicate_db and not is_duplicate_current:
+                        if not is_dup:
                             if txt := src.fetch_content(a['url']):
                                 if res := ana.analyze(txt, a['title']):
-                                    score = int(res.get('score', 0))
-                                    comment = str(res.get('suggestion', '')).replace("None", "")
                                     new_data.append({
-                                        "日期": a['date'],    
-                                        "时间": a['full_time'][11:16], 
-                                        "公众号": r.公众号, 
-                                        "标题": a['title'],   
-                                        "价值": score, 
-                                        "摘要": str(res.get('summary', '')), 
-                                        "点评": comment, 
-                                        "原文": a['url']
+                                        "日期": a['date'], "时间": a['full_time'][11:16], "公众号": r.公众号, "标题": a['title'], 
+                                        "价值": int(res.get('score', 0)), "摘要": str(res.get('summary', '')), 
+                                        "点评": str(res.get('suggestion', '')).replace("None", ""), "原文": a['url']
                                     })
                     bar.progress((i+1)/len(targets))
-                    
                 if new_data:
-                    st.toast("☁️ 同步中..."); df = st.session_state.data_manager.save_data(pd.DataFrame(new_data))
+                    st.toast("☁️ 同步中..."); df = st.session_state.data_manager.save_history(pd.DataFrame(new_data))
                     st.session_state.history_df = df; st.success(f"更新 {len(new_data)} 篇"); time.sleep(1); st.rerun()
                 else: st.toast("✅ 无更新")
     render_results()
